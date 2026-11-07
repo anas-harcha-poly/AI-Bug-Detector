@@ -1,0 +1,6 @@
+# Separate light and dark sections: the page keeps following the viewer's system theme.
+[theme.light]
+primaryColor = "#4F46E5"
+
+[theme.dark]
+primaryColor = "#818CF8"

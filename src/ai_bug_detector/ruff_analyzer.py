@@ -2,7 +2,7 @@
 
 import json
 import subprocess
-import sys
+import sysconfig
 from pathlib import Path
 
 from ai_bug_detector.models import Issue, Severity
@@ -12,11 +12,17 @@ _TIMEOUT_SECONDS = 30
 # Ruff exit codes: 0 = no issue, 1 = issues found, anything else = Ruff failed.
 _SUCCESS_EXIT_CODES = (0, 1)
 
+# The Ruff program installed next to this Python, as an absolute path. Two simpler
+# options are avoided on purpose:
+# - `python -m ruff` starts Ruff as a second process on Windows, which the timeout
+#   cannot stop, and it can run a `ruff.py` found in the current directory.
+# - `import ruff` could also load such a file into this process.
+_RUFF_PATH = Path(sysconfig.get_path("scripts")) / (
+    "ruff" + (sysconfig.get_config_var("EXE") or "")
+)
+
 _RUFF_COMMAND = (
-    sys.executable,  # Use the Ruff installed with this project.
-    "-I",  # Isolated mode: a `ruff.py` in the current directory is never imported.
-    "-m",
-    "ruff",
+    str(_RUFF_PATH),
     "check",
     "--isolated",  # Ignore configuration files: results stay reproducible.
     "--no-cache",  # Do not write a cache to disk.
@@ -55,6 +61,17 @@ def analyze_file(path: str | Path) -> list[Issue]:
         source = Path(path).read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError) as error:
         raise AnalysisError(f"Cannot read file '{path}': {error}") from error
+
+    return analyze_source(source)
+
+
+def analyze_bytes(content: bytes) -> list[Issue]:
+    """Return the issues found in UTF-8 file content, without executing it."""
+    try:
+        # "utf-8-sig" also accepts the BOM that some Windows editors add.
+        source = content.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise AnalysisError("The file is not valid UTF-8 text.") from error
 
     return analyze_source(source)
 

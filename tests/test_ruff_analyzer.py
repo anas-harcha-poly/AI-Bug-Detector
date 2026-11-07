@@ -1,11 +1,18 @@
 """Tests for the Ruff analyzer, using small code samples that contain problems."""
 
 import subprocess
+import time
 
 import pytest
 
+from ai_bug_detector import ruff_analyzer
 from ai_bug_detector.models import Issue, Severity
-from ai_bug_detector.ruff_analyzer import AnalysisError, analyze_file, analyze_source
+from ai_bug_detector.ruff_analyzer import (
+    AnalysisError,
+    analyze_bytes,
+    analyze_file,
+    analyze_source,
+)
 
 
 def find_issue(issues: list[Issue], rule_code: str) -> Issue:
@@ -185,6 +192,22 @@ def test_analyze_file_rejects_non_utf8_file(tmp_path):
         analyze_file(path)
 
 
+# --- Uploaded content ---
+
+
+def test_analyze_bytes_detects_issue():
+    assert find_issue(analyze_bytes(b"print(missing)\n"), "F821")
+
+
+def test_analyze_bytes_accepts_utf8_bom():
+    assert analyze_bytes("x = 1\n".encode("utf-8-sig")) == []
+
+
+def test_analyze_bytes_rejects_non_utf8_content():
+    with pytest.raises(AnalysisError, match="not valid UTF-8"):
+        analyze_bytes("x = 'é'\n".encode("latin-1"))
+
+
 # --- Failures: an analysis that failed must never look like clean code ---
 
 
@@ -244,6 +267,17 @@ def test_ruff_failure_raises_analysis_error(monkeypatch, fake_run, expected_mess
 
     with pytest.raises(AnalysisError, match=expected_message):
         analyze_source("x = 1\n")
+
+
+def test_timeout_really_stops_a_slow_analysis(monkeypatch):
+    # A real Ruff run, not a simulation: Ruff is very slow on one huge comment line.
+    monkeypatch.setattr(ruff_analyzer, "_TIMEOUT_SECONDS", 1)
+    start = time.monotonic()
+
+    with pytest.raises(AnalysisError, match="timed out"):
+        analyze_source("#" * (5 * 1024 * 1024))
+
+    assert time.monotonic() - start < 10
 
 
 def test_text_that_cannot_be_encoded_raises_analysis_error():
