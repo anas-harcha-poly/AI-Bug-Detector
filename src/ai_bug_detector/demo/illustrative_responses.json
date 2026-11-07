@@ -1,0 +1,76 @@
+{
+  "explanations": [
+    {
+      "rule_code": "F821",
+      "line": 19,
+      "explanation": "The name `rate` is used but never defined, so Python raises a NameError when this line runs.",
+      "context": "`rate` looks like a typo for `discount`. Renaming it is not enough: `discount` is only set for members, so the fix replaces lines 17 to 19.",
+      "suggested_fix": "    discount = 0.10 if is_member else 0\n    return price * (1 - discount)"
+    },
+    {
+      "rule_code": "B006",
+      "line": 7,
+      "explanation": "A default list is created once and shared between calls, so a change made in one call can appear in the next one.",
+      "context": "This function only reads `prices` today, but a later change could silently keep data between calls.",
+      "suggested_fix": "def average_price(prices=None):\n    if prices is None:\n        prices = []"
+    },
+    {
+      "rule_code": "F401",
+      "line": 3,
+      "explanation": "This import is never used, which adds noise and can make readers look for code that does not exist.",
+      "context": "Nothing in this file uses `json`, so the line can be deleted.",
+      "suggested_fix": ""
+    },
+    {
+      "rule_code": "F401",
+      "line": 4,
+      "explanation": "This import is never used, which adds noise and can make readers look for code that does not exist.",
+      "context": "Nothing in this file uses `os`, so the line can be deleted.",
+      "suggested_fix": ""
+    },
+    {
+      "rule_code": "F841",
+      "line": 18,
+      "explanation": "This variable receives a value that is never read, which often reveals a typo or unfinished code.",
+      "context": "`discount` is set here, but the return statement reads `rate` instead. The fix for line 19 uses it.",
+      "suggested_fix": ""
+    },
+    {
+      "rule_code": "E711",
+      "line": 15,
+      "explanation": "Checking for None with `==` can be misled by classes that redefine equality. The usual form is `is None`.",
+      "context": "`is_member` should be compared with `is None`.",
+      "suggested_fix": "    if is_member is None:"
+    }
+  ],
+  "bugs": [
+    {
+      "line": 11,
+      "title": "Average divides by one too many",
+      "reasoning": "With [10, 20], the total is 30 and the division is by 3, which returns 10 instead of 15. The fix keeps returning 0.0 for an empty list instead of dividing by zero.",
+      "confidence": "high",
+      "suggested_fix": "    if not prices:\n        return 0.0\n    return total / len(prices)"
+    },
+    {
+      "line": 27,
+      "title": "Last item index is out of range",
+      "reasoning": "With [1, 2, 3], `items[3]` raises IndexError because the last valid index is 2. The fix returns None for an empty list.",
+      "confidence": "high",
+      "suggested_fix": "    return items[-1] if items else None"
+    },
+    {
+      "line": 18,
+      "title": "Discount is undefined for non-members",
+      "reasoning": "With is_member=False, `discount` is never set. Fixing the name on line 19 alone would then raise an error. The fix replaces lines 17 and 18.",
+      "confidence": "medium",
+      "suggested_fix": "    discount = 0.10 if is_member else 0"
+    },
+    {
+      "line": 23,
+      "title": "An 18-year-old may not count as an adult",
+      "reasoning": "With age=18 the result is False. This is a bug if the rule is 18 or older, which depends on the author's intent.",
+      "confidence": "low",
+      "suggested_fix": "    return age >= 18"
+    }
+  ]
+}

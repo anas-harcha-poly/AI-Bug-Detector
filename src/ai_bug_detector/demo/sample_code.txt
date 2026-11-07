@@ -1,0 +1,27 @@
+"""Small shopping cart helpers: a demo file with deliberate bugs."""
+
+import json
+import os
+
+
+def average_price(prices=[]):
+    total = 0
+    for price in prices:
+        total += price
+    return total / (len(prices) + 1)
+
+
+def apply_discount(price, is_member):
+    if is_member == None:
+        is_member = False
+    if is_member:
+        discount = 0.10
+    return price * (1 - rate)
+
+
+def is_adult(age):
+    return age > 18
+
+
+def last_item(items):
+    return items[len(items)]

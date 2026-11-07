@@ -20,9 +20,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=9.2"]
+# Only needed for real AI review: Ruff and the demo work without it.
+ai = ["anthropic>=2.6"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"ai_bug_detector.demo" = ["*.json", "*.txt"]
 
 # Single source of truth: the version lives in the package itself.
 [tool.setuptools.dynamic]

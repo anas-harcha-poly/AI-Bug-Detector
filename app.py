@@ -7,6 +7,7 @@ survive between two runs is kept in st.session_state.
 import streamlit as st
 
 from ai_bug_detector import __version__
+from ai_bug_detector.ai_panel import show_ai_panel, show_demo
 from ai_bug_detector.models import Severity
 from ai_bug_detector.report import count_by_severity, to_table_rows
 from ai_bug_detector.ruff_analyzer import AnalysisError, analyze_bytes
@@ -112,6 +113,9 @@ def main() -> None:
 
     if analysis:
         show_analysis(analysis)
+        show_ai_panel(uploaded_file, analysis)
+
+    show_demo(show_issues)
 
 
 main()
