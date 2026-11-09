@@ -55,3 +55,13 @@ def test_selection_keeps_the_most_severe_issues_up_to_the_limit():
 
     assert len(selected) == MAX_ISSUES == 20
     assert selected[0] == error
+
+
+@pytest.mark.parametrize("prompt", [EXPLANATION_SYSTEM_PROMPT, LOGIC_BUG_SYSTEM_PROMPT])
+def test_instructions_ask_for_the_lines_a_fix_replaces(prompt):
+    text = " ".join(prompt.split())
+
+    assert "`fix_start_line` and `fix_end_line`" in text
+    assert "The range must include `line`" in text
+    assert "Use 0 for both when `suggested_fix` is empty" in text
+    assert "without the line numbers" in text

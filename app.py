@@ -4,10 +4,13 @@ Streamlit runs this whole script again after every interaction, so anything that
 survive between two runs is kept in st.session_state.
 """
 
+import uuid
+
 import streamlit as st
 
 from ai_bug_detector import __version__
-from ai_bug_detector.ai_panel import show_ai_panel, show_demo
+from ai_bug_detector.ai_panel import claude_reviews, show_ai_panel, show_demo
+from ai_bug_detector.fix_panel import show_upload_fixes
 from ai_bug_detector.models import Severity
 from ai_bug_detector.report import count_by_severity, to_table_rows
 from ai_bug_detector.ruff_analyzer import AnalysisError, analyze_bytes
@@ -20,7 +23,13 @@ ANALYSIS_KEY = "analysis"
 
 def analyze_upload(uploaded_file) -> dict:
     """Analyze an uploaded file, keeping it in memory: it is only read, never run."""
-    analysis = {"file_id": uploaded_file.file_id, "issues": [], "error": None}
+    analysis = {
+        "file_id": uploaded_file.file_id,
+        # New for every click on Analyze: choices made on older results are dropped.
+        "run_id": uuid.uuid4().hex,
+        "issues": [],
+        "error": None,
+    }
 
     # The browser also enforces this limit, but the server must not rely on it.
     if uploaded_file.size > MAX_UPLOAD_BYTES:
@@ -116,6 +125,9 @@ def main() -> None:
     if analysis:
         show_analysis(analysis)
         show_ai_panel(uploaded_file, analysis)
+        show_upload_fixes(
+            uploaded_file, analysis, claude_reviews(uploaded_file.file_id)
+        )
         show_sandbox_panel(uploaded_file, analysis)
 
     show_demo(show_issues)

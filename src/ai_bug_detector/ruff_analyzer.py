@@ -5,7 +5,13 @@ import subprocess
 import sysconfig
 from pathlib import Path
 
-from ai_bug_detector.models import Issue, Severity
+from ai_bug_detector.models import (
+    FixApplicability,
+    Issue,
+    RuffEdit,
+    RuffFix,
+    Severity,
+)
 
 _TIMEOUT_SECONDS = 30
 
@@ -122,7 +128,43 @@ def _to_issue(item: dict) -> Issue:
         severity=_severity_for(item["code"]),
         line=item["location"]["row"],
         column=item["location"]["column"],
+        fix=_to_fix(item.get("fix")),
     )
+
+
+def _to_fix(value: object) -> RuffFix | None:
+    """Read Ruff's own fix, if any. It is only stored here, never applied.
+
+    The fix is an optional extra: if its shape is unexpected (for example after a
+    Ruff update), it is dropped, and the issue itself is still reported.
+    """
+    if not isinstance(value, dict):
+        return None
+    try:
+        applicability = FixApplicability(value["applicability"])
+        message = value.get("message") or ""
+        edits = tuple(_to_edit(edit) for edit in value["edits"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not edits or not isinstance(message, str):
+        return None
+    return RuffFix(applicability, message, edits)
+
+
+def _to_edit(edit: dict) -> RuffEdit:
+    numbers = (
+        edit["location"]["row"],
+        edit["location"]["column"],
+        edit["end_location"]["row"],
+        edit["end_location"]["column"],
+    )
+    content = edit["content"]
+    # bool is checked because True is also an int in Python.
+    if not all(isinstance(n, int) and not isinstance(n, bool) for n in numbers):
+        raise ValueError("Invalid position")
+    if min(numbers) < 1 or not isinstance(content, str):
+        raise ValueError("Invalid edit")
+    return RuffEdit(*numbers, content)
 
 
 def _severity_for(rule_code: str) -> Severity:

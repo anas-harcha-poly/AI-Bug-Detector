@@ -1,5 +1,6 @@
 """Tests for reviewers, costs and project-wide secret safety. No SDK is needed here."""
 
+import json
 import re
 import subprocess
 import sys
@@ -197,3 +198,47 @@ def test_secret_files_are_ignored_by_git(name):
     )
 
     assert result.returncode == 0
+
+
+# --- A simulated Claude answer with ranges, down to the corrected code ---
+
+
+def test_simulated_claude_fix_on_several_lines_can_be_applied(monkeypatch):
+    from ai_bug_detector.fixes import (
+        FixOrigin,
+        apply_fixes,
+        check_fix,
+        fixes_from_review,
+    )
+
+    source = (
+        "def total(values):\n"
+        "    result = 0\n"
+        "    for v in values:\n"
+        "        result += v\n"
+        "    return result + 1\n"
+    )
+    answer = json.dumps(
+        {
+            "bugs": [
+                {
+                    "line": 5,
+                    "title": "Off by one",
+                    "reasoning": "total([]) returns 1 instead of 0.",
+                    "confidence": "high",
+                    "suggested_fix": "    return sum(values)",
+                    "fix_start_line": 2,
+                    "fix_end_line": 5,
+                }
+            ]
+        }
+    )
+    review = reviewer_returning(monkeypatch, response(answer)).find_logic_bugs(source)
+
+    (fix,), unusable = fixes_from_review(source, review, FixOrigin.CLAUDE)
+
+    assert unusable == []
+    assert check_fix(source, fix).applicable
+    assert apply_fixes(source, [fix]).corrected == (
+        "def total(values):\n    return sum(values)\n"
+    )

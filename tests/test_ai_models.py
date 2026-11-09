@@ -3,6 +3,8 @@
 import pytest
 
 from ai_bug_detector.ai_models import (
+    EXPLANATION_SCHEMA,
+    LOGIC_BUG_SCHEMA,
     AiReviewError,
     Confidence,
     parse_explanations,
@@ -104,3 +106,61 @@ def test_items_over_the_limit_are_ignored_and_counted():
 def test_wrong_overall_format_raises_an_error(data):
     with pytest.raises(AiReviewError, match="expected format"):
         parse_logic_bugs(data, line_count=2)
+
+
+# --- The lines a suggestion replaces ---
+
+
+def test_schemas_require_the_lines_to_replace():
+    for schema, field in (
+        (EXPLANATION_SCHEMA, "explanations"),
+        (LOGIC_BUG_SCHEMA, "bugs"),
+    ):
+        item = schema["properties"][field]["items"]
+        assert {"fix_start_line", "fix_end_line"} <= set(item["required"])
+        assert item["properties"]["fix_start_line"] == {"type": "integer"}
+
+
+def test_range_is_read():
+    data = {"explanations": [explanation(fix_start_line=2, fix_end_line=4)]}
+
+    (item,) = parse_explanations(data, [ISSUE]).explanations
+
+    assert (item.fix_start_line, item.fix_end_line) == (2, 4)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        pytest.param({}, id="older-answer-without-range"),
+        pytest.param({"fix_start_line": 0, "fix_end_line": 0}, id="zeros"),
+    ],
+)
+def test_missing_or_zero_range_means_not_given(changes):
+    data = {"bugs": [bug(**changes)]}
+
+    (item,) = parse_logic_bugs(data, line_count=2).bugs
+
+    assert (item.fix_start_line, item.fix_end_line) == (None, None)
+
+
+def test_partial_range_is_kept_as_is_for_the_fix_check_to_refuse():
+    data = {"bugs": [bug(fix_start_line=2, fix_end_line=0)]}
+
+    (item,) = parse_logic_bugs(data, line_count=2).bugs
+
+    assert (item.fix_start_line, item.fix_end_line) == (2, None)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [-1, "2", 2.0, True, [2]],
+    ids=["negative", "text", "float", "bool", "list"],
+)
+def test_range_of_the_wrong_type_drops_the_item(value):
+    data = {"bugs": [bug(fix_start_line=value, fix_end_line=2), bug()]}
+
+    review = parse_logic_bugs(data, line_count=2)
+
+    assert len(review.bugs) == 1
+    assert review.ignored_count == 1

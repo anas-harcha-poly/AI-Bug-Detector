@@ -9,8 +9,15 @@ from importlib import resources
 
 import pytest
 
-from ai_bug_detector.ai_review import read_demo_source
-from ai_bug_detector.ruff_analyzer import analyze_source
+from ai_bug_detector.ai_review import DemoReviewer, read_demo_source
+from ai_bug_detector.fixes import (
+    FixOrigin,
+    apply_fixes,
+    fixes_from_issues,
+    fixes_from_review,
+)
+from ai_bug_detector.models import FixApplicability
+from ai_bug_detector.ruff_analyzer import analyze_bytes, analyze_source
 
 # The demo file once every suggested fix has been applied.
 FIXED_SAMPLE = '''\
@@ -77,6 +84,52 @@ def fixed():
 def test_each_suggested_fix_appears_as_is_in_the_fixed_file(fix):
     # Exact text, indentation included: a fix pasted as shown must fit the file.
     assert fix in FIXED_SAMPLE
+
+
+def demo_fixes_without_overlap() -> tuple[str, list]:
+    """The demo's own fixes, prepared with their line ranges.
+
+    Two of them change lines 17 and 18. The explanation of line 19 rewrites both
+    lines, so the logic fix for line 18 is left out, as a user would do.
+    """
+    content = read_demo_source()
+    source = content.decode("utf-8")
+    reviewer = DemoReviewer()
+    explanations = reviewer.explain_issues(source, analyze_bytes(content))
+    logic = reviewer.find_logic_bugs(source)
+    fixes = fixes_from_review(source, explanations, FixOrigin.DEMO)[0]
+    fixes += [
+        fix
+        for fix in fixes_from_review(source, logic, FixOrigin.DEMO)[0]
+        if fix.description != "Discount is undefined for non-members"
+    ]
+    return source, fixes
+
+
+def test_demo_fixes_applied_with_their_ranges_give_the_fixed_file():
+    source, fixes = demo_fixes_without_overlap()
+
+    corrected = apply_fixes(source, fixes).corrected
+
+    # The demo answers do not remove the unused imports: Ruff's fixes do that.
+    with_imports = FIXED_SAMPLE.replace(
+        '"""\n\n\ndef', '"""\n\nimport json\nimport os\n\n\ndef', 1
+    )
+    assert corrected == with_imports
+
+
+def test_demo_and_safe_ruff_fixes_together_leave_no_issue():
+    source, demo_fixes = demo_fixes_without_overlap()
+    ruff_fixes, _ = fixes_from_issues(source, analyze_source(source))
+    safe = [fix for fix in ruff_fixes if fix.applicability is FixApplicability.SAFE]
+
+    corrected = apply_fixes(source, demo_fixes + safe).corrected
+
+    assert analyze_source(corrected) == []
+    functions = load_functions(corrected)  # Our own demo code only.
+    assert functions["average_price"]([10, 20]) == 15
+    assert functions["apply_discount"](100, False) == 100
+    assert functions["last_item"]([]) is None
 
 
 def test_fixed_file_has_no_ruff_issues():

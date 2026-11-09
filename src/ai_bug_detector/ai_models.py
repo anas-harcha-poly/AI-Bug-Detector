@@ -44,6 +44,9 @@ class IssueExplanation:
     explanation: str
     context: str
     suggested_fix: str  # Empty when the AI proposes no fix.
+    # The lines suggested_fix replaces. None when not given, as in older answers.
+    fix_start_line: int | None = None
+    fix_end_line: int | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,9 @@ class LogicBug:
     reasoning: str
     confidence: Confidence
     suggested_fix: str  # Empty when the AI proposes no fix.
+    # The lines suggested_fix replaces. None when not given, as in older answers.
+    fix_start_line: int | None = None
+    fix_end_line: int | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +92,8 @@ def _object_schema(properties: dict) -> dict:
 
 _STRING = {"type": "string"}
 _INTEGER = {"type": "integer"}
+# 0 for both when there is no fix: null values in schemas are avoided on purpose.
+_FIX_RANGE = {"fix_start_line": _INTEGER, "fix_end_line": _INTEGER}
 
 # The API rejects length limits in a schema, so they are enforced in the code below.
 EXPLANATION_SCHEMA = _object_schema(
@@ -99,6 +107,7 @@ EXPLANATION_SCHEMA = _object_schema(
                     "explanation": _STRING,
                     "context": _STRING,
                     "suggested_fix": _STRING,
+                    **_FIX_RANGE,
                 }
             ),
         }
@@ -118,6 +127,7 @@ LOGIC_BUG_SCHEMA = _object_schema(
                         "enum": [level.value for level in Confidence],
                     },
                     "suggested_fix": _STRING,
+                    **_FIX_RANGE,
                 }
             ),
         }
@@ -138,6 +148,7 @@ def parse_explanations(data: object, issues: list[Issue]) -> ExplanationReview:
                 explanation=_text(item, "explanation"),
                 context=_text(item, "context"),
                 suggested_fix=_fix(item),
+                **_fix_range(item),
             )
         except ValueError:
             ignored_count += 1
@@ -161,6 +172,7 @@ def parse_logic_bugs(data: object, line_count: int) -> LogicReview:
                 reasoning=_text(item, "reasoning"),
                 confidence=_confidence(item),
                 suggested_fix=_fix(item),
+                **_fix_range(item),
             )
         except ValueError:
             ignored_count += 1
@@ -200,6 +212,23 @@ def _fix(item: object) -> str:
     if not isinstance(value, str) or len(value) > _MAX_FIX_LENGTH:
         raise ValueError("Invalid suggested fix")
     return value
+
+
+def _fix_range(item: object) -> dict[str, int | None]:
+    """Read the lines a fix replaces. Missing or 0 means "not given".
+
+    Only the types are checked here. Whether the range fits the file is checked when
+    the fix is prepared, where the file is known.
+    """
+    values = {}
+    for name in ("fix_start_line", "fix_end_line"):
+        value = item.get(name) if isinstance(item, dict) else None
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+        ):
+            raise ValueError(f"Invalid line number: {name}")
+        values[name] = value or None  # 0 becomes None.
+    return values
 
 
 def _line(item: object) -> int:

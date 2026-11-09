@@ -29,6 +29,8 @@ from ai_bug_detector.ai_review import (
     read_demo_source,
     sdk_available,
 )
+from ai_bug_detector.fix_panel import code_for_display, show_fix_panel
+from ai_bug_detector.fixes import FixOrigin, split_lines
 from ai_bug_detector.ruff_analyzer import AnalysisError, analyze_bytes
 
 DEMO_OPEN_KEY = "ai_demo_open"
@@ -101,10 +103,35 @@ def show_demo(show_issues: Callable[[list], None]) -> None:
     show_issues(issues)
 
     reviewer = DemoReviewer()
+    explanations = reviewer.explain_issues(source, issues)
+    logic = reviewer.find_logic_bugs(source)
     st.markdown("#### Explanations (illustrative)")
-    _show_review(reviewer.explain_issues(source, issues), source)
+    _show_review(explanations, source)
     st.markdown("#### Possible logic bugs (illustrative)")
-    _show_review(reviewer.find_logic_bugs(source), source)
+    _show_review(logic, source)
+
+    show_fix_panel(
+        context="demo",
+        file_name="sample_code.py",
+        source=source,
+        issues=issues,
+        reviews=[(explanations, FixOrigin.DEMO), (logic, FixOrigin.DEMO)],
+    )
+
+
+def claude_reviews(file_id: str) -> list[ExplanationReview | LogicReview]:
+    """Return Claude's finished reviews of this upload, for the model now selected.
+
+    These are the reviews shown in the AI section: their fixes are offered below it.
+    """
+    if not live_ai_enabled() or st.session_state.get(RESULTS_FILE_KEY) != file_id:
+        return []
+    results = st.session_state.get(RESULTS_KEY, {})
+    model_id = st.session_state.get("ai_model", AI_MODELS[0].model_id)
+    reviews = (
+        results.get((model_id, action)) for action in (EXPLAIN_ACTION, LOGIC_ACTION)
+    )
+    return [r for r in reviews if isinstance(r, ExplanationReview | LogicReview)]
 
 
 def _toggle_demo() -> None:
@@ -239,7 +266,7 @@ def _show_review(
     model_id: str | None = None,
 ) -> None:
     """Display a review, whichever reviewer produced it."""
-    lines = source.splitlines()
+    lines = split_lines(source)  # Numbered like Python and Ruff number them.
     if isinstance(review, ExplanationReview):
         if not review.explanations:
             st.text("No explanations were returned.")
@@ -271,7 +298,7 @@ def _show_explanation(item, lines: list[str]) -> None:
         st.caption(f"Line {item.line} · Rule {item.rule_code}")
         st.text(item.explanation)
         st.text(item.context)
-        _show_fix(item.suggested_fix, item.line, lines)
+        _show_fix(item, lines)
 
 
 def _show_logic_bug(item, lines: list[str]) -> None:
@@ -279,13 +306,24 @@ def _show_logic_bug(item, lines: list[str]) -> None:
         st.caption(f"Line {item.line} · Confidence: {item.confidence.value}")
         st.text(item.title)
         st.text(item.reasoning)
-        _show_fix(item.suggested_fix, item.line, lines)
+        _show_fix(item, lines)
 
 
-def _show_fix(suggested_fix: str, line: int, lines: list[str]) -> None:
-    if not suggested_fix.strip():
+def _show_fix(item, lines: list[str]) -> None:
+    """Show every line the suggestion replaces, then the suggestion itself."""
+    if not item.suggested_fix.strip():
         return
-    st.caption(f"Current code (line {line})")
-    st.code(lines[line - 1] if line <= len(lines) else "", language="python")
+    start, end = item.fix_start_line, item.fix_end_line
+    if start is None and end is None:
+        start = end = item.line  # An older answer: it replaces the reported line.
+    if start is None or end is None or not 1 <= start <= end <= len(lines):
+        st.caption(
+            "The lines this suggestion replaces are missing or not valid: see "
+            "Suggested fixes below."
+        )
+    else:
+        label = f"line {start}" if start == end else f"lines {start}–{end}"
+        st.caption(f"Current code ({label})")
+        st.code(code_for_display("".join(lines[start - 1 : end])), language="python")
     st.caption("Suggested change: not applied, review it before using it")
-    st.code(suggested_fix, language="python")
+    st.code(item.suggested_fix, language="python")
