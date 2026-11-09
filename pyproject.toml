@@ -19,7 +19,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=9.2"]
+# fakeredis runs the real Lua budget scripts in tests, without any database.
+dev = ["pytest>=9.2", "fakeredis[lua]>=2.40"]
 # Only needed for real AI review: Ruff and the demo work without it.
 ai = ["anthropic>=2.6"]
 

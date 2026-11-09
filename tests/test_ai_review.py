@@ -242,3 +242,90 @@ def test_simulated_claude_fix_on_several_lines_can_be_applied(monkeypatch):
     assert apply_fixes(source, [fix]).corrected == (
         "def total(values):\n    return sum(values)\n"
     )
+
+
+# --- Spending limit, without any network ---
+
+
+@pytest.fixture
+def no_spending(monkeypatch):
+    from ai_bug_detector.ai_review import SPEND_LIMIT_VARIABLE, SPENDING
+
+    SPENDING.reset()
+    monkeypatch.delenv(SPEND_LIMIT_VARIABLE, raising=False)
+    yield SPENDING
+    SPENDING.reset()
+
+
+def test_reservations_and_costs_add_up_to_the_limit(no_spending):
+    tracker = no_spending
+
+    assert tracker.reserve(0.6, limit=1.0)
+    assert not tracker.reserve(0.5, limit=1.0)  # 0.6 already reserved.
+    tracker.settle(0.6, cost=0.1)
+    assert (tracker.spent, tracker.reserved) == (pytest.approx(0.1), 0)
+    assert tracker.reserve(0.5, limit=1.0)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, 1.0),
+        ("", 1.0),
+        ("5", 5.0),
+        ("0.25", 0.25),
+        ("abc", 0.0),
+        ("-1", 0.0),
+        ("nan", 0.0),
+        ("inf", 0.0),
+    ],
+)
+def test_spending_limit_setting(no_spending, monkeypatch, value, expected):
+    from ai_bug_detector.ai_review import SPEND_LIMIT_VARIABLE, spend_limit
+
+    if value is not None:
+        monkeypatch.setenv(SPEND_LIMIT_VARIABLE, value)
+
+    assert spend_limit() == expected
+
+
+def test_reviewer_over_the_limit_sends_nothing(no_spending, monkeypatch):
+    from ai_bug_detector.ai_review import SPEND_LIMIT_VARIABLE
+
+    monkeypatch.setenv(SPEND_LIMIT_VARIABLE, "0")
+    reviewer = ClaudeReviewer("fake-key", "claude-sonnet-5-5")
+
+    def must_not_send(*args):
+        raise AssertionError("Nothing may be sent over the limit.")
+
+    monkeypatch.setattr(reviewer, "_send", must_not_send)
+
+    with pytest.raises(AiReviewError, match="Nothing was sent"):
+        reviewer.find_logic_bugs(SOURCE)
+
+
+# --- Claude sees the same line numbers as the fixes use ---
+
+
+def test_lines_are_numbered_like_python_even_with_special_characters(monkeypatch):
+    from ai_bug_detector.ai_prompts import build_logic_bug_message
+    from ai_bug_detector.fixes import FixOrigin, apply_fixes, fixes_from_review
+
+    # \x0c and \u2028 end a line for str.splitlines(), but not for Python or Ruff.
+    source = 'note = "a\x0cb\u2028c"\ndef f():\n    return 1 + 1\n'
+    numbered = json.loads(build_logic_bug_message(source))["numbered_code"]
+    assert numbered[2] == "3:     return 1 + 1"
+
+    # A simulated answer using the line numbers Claude was shown.
+    answer = (
+        '{"bugs": [{"line": 3, "title": "t", "reasoning": "r", "confidence": "low",'
+        ' "suggested_fix": "    return 2", "fix_start_line": 3, "fix_end_line": 3}]}'
+    )
+    reviewer = reviewer_returning(monkeypatch, response(answer))
+    (fix,), _ = fixes_from_review(
+        source, reviewer.find_logic_bugs(source), FixOrigin.CLAUDE
+    )
+
+    assert apply_fixes(source, [fix]).corrected == (
+        'note = "a\x0cb\u2028c"\ndef f():\n    return 2\n'
+    )

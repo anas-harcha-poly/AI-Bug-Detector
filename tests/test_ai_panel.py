@@ -550,3 +550,48 @@ def test_analyzed_code_is_never_executed_before_being_sent(
     live_app.button(key="ai_logic").click().run()
 
     assert not marker.exists()
+
+
+# --- Spending limit ---
+
+
+@pytest.fixture
+def spending(monkeypatch):
+    from ai_bug_detector.ai_review import SPEND_LIMIT_VARIABLE, SPENDING
+
+    SPENDING.reset()
+    monkeypatch.delenv(SPEND_LIMIT_VARIABLE, raising=False)
+    yield SPEND_LIMIT_VARIABLE
+    SPENDING.reset()
+
+
+def test_spending_limit_is_shown_before_any_call(live_app, spending):
+    analyze(live_app, CODE_WITH_ISSUE)
+
+    assert "Spending limit of this app while it runs: $1.00" in all_text(live_app)
+    assert spending in all_text(live_app)
+
+
+def test_reviews_that_could_exceed_the_limit_cannot_be_started(spending, monkeypatch):
+    monkeypatch.setenv(spending, "0.001")
+    monkeypatch.setenv(LIVE_AI_VARIABLE, "1")
+    monkeypatch.setattr(ai_panel, "sdk_available", lambda: True)
+    app = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
+    analyze(app, CODE_WITH_ISSUE)
+
+    agree(app)
+
+    assert app.button(key="ai_explain").disabled
+    assert app.button(key="ai_logic").disabled
+    assert "could go over the spending limit" in all_text(app)
+    assert FakeReviewer.calls == []
+
+
+def test_spending_shown_includes_what_was_already_used(live_app, spending):
+    from ai_bug_detector.ai_review import SPENDING
+
+    SPENDING.settle(0.0, cost=0.25)
+
+    analyze(live_app, CODE_WITH_ISSUE)
+
+    assert "$0.250 is already used" in all_text(live_app)

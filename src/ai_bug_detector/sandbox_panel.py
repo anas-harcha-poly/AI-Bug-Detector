@@ -17,6 +17,7 @@ import uuid
 
 import streamlit as st
 
+from ai_bug_detector.deployment import is_public
 from ai_bug_detector.docker_sandbox import (
     SANDBOX_VARIABLE,
     STATUS_MESSAGES,
@@ -99,6 +100,12 @@ def show_sandbox_panel(uploaded_file, analysis: dict) -> None:
     st.divider()
     st.subheader("Run your tests (optional)")
 
+    if is_public():
+        st.caption(
+            "Running tests is not available on this public site, and no code is ever "
+            "run here."
+        )
+        return
     if not sandbox_enabled():
         st.caption(
             "Running tests is off in this version, and no code is ever run. It can be "

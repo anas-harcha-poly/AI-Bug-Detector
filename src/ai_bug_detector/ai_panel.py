@@ -9,7 +9,12 @@ from collections.abc import Callable
 
 import streamlit as st
 
-from ai_bug_detector.ai_models import AiReviewError, ExplanationReview, LogicReview
+from ai_bug_detector.ai_models import (
+    AiReviewError,
+    AiUnavailableError,
+    ExplanationReview,
+    LogicReview,
+)
 from ai_bug_detector.ai_prompts import (
     EXPLANATION_SYSTEM_PROMPT,
     LOGIC_BUG_SYSTEM_PROMPT,
@@ -21,6 +26,10 @@ from ai_bug_detector.ai_prompts import (
 )
 from ai_bug_detector.ai_review import (
     AI_MODELS,
+    PAID_AI_PAUSE,
+    PUBLIC_MODELS,
+    SPEND_LIMIT_VARIABLE,
+    SPENDING,
     ClaudeReviewer,
     DemoReviewer,
     actual_cost,
@@ -28,10 +37,23 @@ from ai_bug_detector.ai_review import (
     live_ai_enabled,
     read_demo_source,
     sdk_available,
+    spend_limit,
+)
+from ai_bug_detector.deployment import (
+    Mode,
+    deployment_mode,
+    server_api_key,
+    server_key_configured,
 )
 from ai_bug_detector.fix_panel import code_for_display, show_fix_panel
 from ai_bug_detector.fixes import FixOrigin, split_lines
 from ai_bug_detector.ruff_analyzer import AnalysisError, analyze_bytes
+from ai_bug_detector.shared_budget import (
+    VISITOR_MESSAGES,
+    Availability,
+    public_budget,
+    public_status,
+)
 
 DEMO_OPEN_KEY = "ai_demo_open"
 RESULTS_KEY = "ai_results"
@@ -45,6 +67,13 @@ DEMO_NOTICE = (
     "No code is sent anywhere and no API key is needed."
 )
 CONSENT_LABEL = "I agree to send this file's code to Anthropic for this review."
+PUBLIC_UNAVAILABLE = VISITOR_MESSAGES[Availability.UNAVAILABLE]
+# Visitors are never told about the owner's account: the same message is used.
+PUBLIC_PAUSED = PUBLIC_UNAVAILABLE
+_ACCOUNT_STOP_REASON = (
+    "Anthropic refused the site's key or account (credits, spend limit or key). "
+    "Check the Claude Console, then resume."
+)
 
 
 def show_ai_panel(uploaded_file, analysis: dict) -> None:
@@ -55,7 +84,17 @@ def show_ai_panel(uploaded_file, analysis: dict) -> None:
     st.divider()
     st.subheader("AI review (optional)")
 
-    if not live_ai_enabled():
+    mode = deployment_mode()
+    if mode is Mode.PUBLIC:
+        # Always shown: when Claude cannot be used, its buttons are disabled and a
+        # message says why.
+        _show_live_review(uploaded_file, analysis["issues"], public=True)
+    elif mode is Mode.MISCONFIGURED:
+        st.caption(
+            "AI review is off: this site's configuration is not valid. Ruff, the "
+            "fixes and the demo still work."
+        )
+    elif not live_ai_enabled():
         st.caption(
             "Real AI review is off in this version and nothing is sent to any AI "
             "service. It can be turned on when you run the app on your own computer: "
@@ -67,7 +106,7 @@ def show_ai_panel(uploaded_file, analysis: dict) -> None:
             "Ruff keeps working without it."
         )
     else:
-        _show_live_review(uploaded_file, analysis["issues"])
+        _show_live_review(uploaded_file, analysis["issues"], public=False)
 
 
 def show_demo(show_issues: Callable[[list], None]) -> None:
@@ -124,7 +163,8 @@ def claude_reviews(file_id: str) -> list[ExplanationReview | LogicReview]:
 
     These are the reviews shown in the AI section: their fixes are offered below it.
     """
-    if not live_ai_enabled() or st.session_state.get(RESULTS_FILE_KEY) != file_id:
+    paid_ai_possible = deployment_mode() is Mode.PUBLIC or live_ai_enabled()
+    if not paid_ai_possible or st.session_state.get(RESULTS_FILE_KEY) != file_id:
         return []
     results = st.session_state.get(RESULTS_KEY, {})
     model_id = st.session_state.get("ai_model", AI_MODELS[0].model_id)
@@ -139,8 +179,13 @@ def _toggle_demo() -> None:
     st.session_state[DEMO_OPEN_KEY] = not st.session_state.get(DEMO_OPEN_KEY, False)
 
 
-def _show_live_review(uploaded_file, issues: list) -> None:
-    """Ask for a key and consent, then make a real call when a button is clicked."""
+def _show_live_review(uploaded_file, issues: list, *, public: bool) -> None:
+    """Ask for consent, then make a real call when a button is clicked.
+
+    Local mode: the user types their own key. Public mode: there is no key field at
+    all; the site owner's key is read on the server at the moment of the call, and
+    never stored anywhere a session can reach.
+    """
     content = uploaded_file.getvalue()
     if len(content) > MAX_SOURCE_BYTES:
         st.warning(
@@ -151,19 +196,32 @@ def _show_live_review(uploaded_file, issues: list) -> None:
     source = content.decode("utf-8-sig")  # Ruff already accepted this file as UTF-8.
     selected_issues = select_issues(issues)
 
-    api_key = st.text_input(
-        "Anthropic API key",
-        type="password",
-        key="ai_api_key",
-        autocomplete="off",
-        help="Kept in memory for this session only. It is never saved to a file.",
-    ).strip()
+    if public:
+        st.caption(
+            "This site pays for AI reviews: you do not need an API key. Its budget "
+            "is small and shared by all visitors, so reviews may become unavailable."
+        )
+        api_key, key_given = "", True
+    else:
+        api_key = st.text_input(
+            "Anthropic API key",
+            type="password",
+            key="ai_api_key",
+            autocomplete="off",
+            help="Kept in memory for this session only. It is never saved to a file.",
+        ).strip()
+        key_given = bool(api_key)
+
+    models = PUBLIC_MODELS if public else AI_MODELS
+    model_ids = [model.model_id for model in models]
     model_id = st.selectbox(
         "Model",
-        [model.model_id for model in AI_MODELS],
-        format_func={model.model_id: model.label for model in AI_MODELS}.get,
+        model_ids,
+        format_func={model.model_id: model.label for model in models}.get,
         key="ai_model",
     )
+    if model_id not in model_ids:
+        model_id = model_ids[0]  # Never a model this mode does not offer.
 
     results = _results_for(uploaded_file.file_id)
 
@@ -180,9 +238,9 @@ def _show_live_review(uploaded_file, issues: list) -> None:
         "sent to the Anthropic API. The file name is not sent. Anthropic may keep this "
         "data for up to 30 days, and does not use API data for training by default. "
         "Do not send passwords, keys or other secrets.\n\n"
-        f"Estimated maximum cost on your API account: ${explain_cost:.3f} to explain "
-        f"issues, ${logic_cost:.3f} to search for logic bugs. Only one request is made "
-        "per click, and nothing is retried."
+        f"Estimated maximum cost on {'this site' if public else 'your'} API account: "
+        f"${explain_cost:.3f} to explain issues, ${logic_cost:.3f} to search for logic "
+        "bugs. Only one request is made per click, and nothing is retried."
     )
     if len(issues) > MAX_ISSUES:
         st.caption(
@@ -190,11 +248,19 @@ def _show_live_review(uploaded_file, issues: list) -> None:
             "explained."
         )
 
+    if public:
+        explain_refusal = _public_refusal(explain_cost)
+        logic_refusal = _public_refusal(logic_cost)
+        if explain_refusal or logic_refusal:
+            st.info(explain_refusal or logic_refusal)
+    else:
+        explain_refusal, logic_refusal = _local_refusals(explain_cost, logic_cost)
+
     # The key includes the file and model: changing either one asks for consent again.
     consent = st.checkbox(
         CONSENT_LABEL, key=f"ai_consent_{uploaded_file.file_id}_{model_id}"
     )
-    can_send = consent and bool(api_key)
+    can_send = consent and key_given
 
     explain_column, logic_column = st.columns(2)
     explain_clicked = explain_column.button(
@@ -203,27 +269,40 @@ def _show_live_review(uploaded_file, issues: list) -> None:
         disabled=(
             not can_send
             or not selected_issues
+            or explain_refusal is not None
             or _is_done(results, model_id, EXPLAIN_ACTION)
         ),
     )
     logic_clicked = logic_column.button(
         "Search for logic bugs",
         key="ai_logic",
-        disabled=not can_send or _is_done(results, model_id, LOGIC_ACTION),
+        disabled=(
+            not can_send
+            or logic_refusal is not None
+            or _is_done(results, model_id, LOGIC_ACTION)
+        ),
     )
 
     # Checked again here: this is the last step before code leaves the computer.
+    # The budget itself is checked once more, atomically, by the reservation.
     if can_send and (explain_clicked or logic_clicked):
-        reviewer = ClaudeReviewer(api_key, model_id)
-        with st.spinner("Waiting for Claude..."):
-            if explain_clicked:
-                results[model_id, EXPLAIN_ACTION] = _call(
-                    lambda: reviewer.explain_issues(source, selected_issues)
-                )
-            else:
-                results[model_id, LOGIC_ACTION] = _call(
-                    lambda: reviewer.find_logic_bugs(source)
-                )
+        action = EXPLAIN_ACTION if explain_clicked else LOGIC_ACTION
+        # Public mode: read on the server now, used for this call, then dropped.
+        key = server_api_key() if public else api_key
+        if not key:
+            results[model_id, action] = PUBLIC_UNAVAILABLE
+        else:
+            reviewer = ClaudeReviewer(key, model_id)
+            with st.spinner("Waiting for Claude..."):
+                if explain_clicked:
+                    results[model_id, action] = _call(
+                        lambda: reviewer.explain_issues(source, selected_issues),
+                        public,
+                    )
+                else:
+                    results[model_id, action] = _call(
+                        lambda: reviewer.find_logic_bugs(source), public
+                    )
         st.rerun()  # Updates the buttons above, which are drawn before the call.
 
     for action, title in (
@@ -236,6 +315,34 @@ def _show_live_review(uploaded_file, issues: list) -> None:
         elif result is not None:
             st.markdown(f"#### {title}")
             _show_review(result, source, model_id)
+
+
+def _public_refusal(cost: float) -> str | None:
+    """Why a review of this maximum cost cannot start on this site, or None."""
+    if not server_key_configured() or not sdk_available() or PAID_AI_PAUSE.is_paused():
+        return PUBLIC_UNAVAILABLE
+    availability = public_status().refusal_for(cost)
+    return None if availability is None else VISITOR_MESSAGES[availability]
+
+
+def _local_refusals(explain_cost: float, logic_cost: float) -> tuple:
+    """Local mode: the in-memory limit of this process, shown to its owner."""
+    limit = spend_limit()
+    remaining = max(0.0, limit - SPENDING.spent - SPENDING.reserved)
+    st.caption(
+        f"Spending limit of this app while it runs: ${limit:.2f}, of which "
+        f"${SPENDING.spent:.3f} is already used. Set {SPEND_LIMIT_VARIABLE} to "
+        "change it."
+    )
+    if min(explain_cost, logic_cost) > remaining:
+        st.caption(
+            "A review could go over the spending limit, so it cannot be started."
+        )
+    message = "Over the spending limit."
+    return (
+        message if explain_cost > remaining else None,
+        message if logic_cost > remaining else None,
+    )
 
 
 def _results_for(file_id: str) -> dict:
@@ -252,10 +359,21 @@ def _is_done(results: dict, model_id: str, action: str) -> bool:
     return result is not None and not isinstance(result, str)
 
 
-def _call(review: Callable) -> ExplanationReview | LogicReview | str:
+def _call(review: Callable, public: bool) -> ExplanationReview | LogicReview | str:
     """Return the review, or a message that is safe to show if it failed."""
     try:
         return review()
+    except AiUnavailableError as error:
+        if not public:
+            return str(error)  # The user's own account: they can act on it.
+        # The site owner's account: stop paid AI for everyone, on every server,
+        # until the owner checks the account and resumes it. Visitors are not
+        # given details about the owner's account.
+        PAID_AI_PAUSE.pause()  # This server, even if the storage cannot be reached.
+        budget = public_budget()
+        if budget is not None:
+            budget.stop(_ACCOUNT_STOP_REASON)
+        return PUBLIC_PAUSED
     except AiReviewError as error:
         return str(error)
 

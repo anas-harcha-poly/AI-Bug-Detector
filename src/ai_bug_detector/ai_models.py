@@ -18,6 +18,17 @@ _MAX_FIX_LENGTH = 4000
 class AiReviewError(Exception):
     """The AI review failed. The message is safe to show to the user."""
 
+    # True when the request may have reached Claude and been billed, for example
+    # after a timeout: its maximum cost is then counted, to stay on the safe side.
+    maybe_billed = False
+
+
+class AiUnavailableError(AiReviewError):
+    """The API account cannot be used now: no credit, a spending limit, a bad key.
+
+    Retrying will not help. On a public site, paid AI is paused for everyone.
+    """
+
 
 class Confidence(StrEnum):
     """How sure the AI says it is about a possible bug."""

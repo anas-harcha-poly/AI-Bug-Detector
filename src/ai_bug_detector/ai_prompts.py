@@ -6,6 +6,7 @@ it contains, so a file cannot pretend to end the data and start new instructions
 
 import json
 
+from ai_bug_detector.fixes import split_lines
 from ai_bug_detector.models import Issue
 from ai_bug_detector.report import sort_issues
 
@@ -90,7 +91,12 @@ def build_logic_bug_message(source: str) -> str:
 
 
 def _number_lines(source: str) -> list[str]:
-    return [f"{number}: {line}" for number, line in enumerate(source.splitlines(), 1)]
+    # Numbered exactly as Ruff and the fixes count lines, so that the line numbers
+    # Claude answers with point to the same lines when a fix is applied.
+    return [
+        f"{number}: {line.rstrip(chr(13) + chr(10))}"
+        for number, line in enumerate(split_lines(source), 1)
+    ]
 
 
 def _to_json(data: dict) -> str:

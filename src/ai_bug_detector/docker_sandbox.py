@@ -20,6 +20,7 @@ import uuid
 from enum import StrEnum
 from pathlib import Path
 
+from ai_bug_detector.deployment import is_public
 from ai_bug_detector.sandbox_models import (
     MAX_OUTPUT_BYTES,
     RunStatus,
@@ -90,8 +91,12 @@ STATUS_MESSAGES = {
 
 
 def sandbox_enabled() -> bool:
-    """Return True only if running uploaded code was explicitly turned on."""
-    return os.environ.get(SANDBOX_VARIABLE) == "1"
+    """Return True only if running uploaded code was explicitly turned on.
+
+    Never on a public site, whatever the setting: running visitors' code needs a host
+    built for it, which a public deployment of this app is not.
+    """
+    return not is_public() and os.environ.get(SANDBOX_VARIABLE) == "1"
 
 
 def find_docker() -> Path | None:
