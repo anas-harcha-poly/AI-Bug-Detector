@@ -35,6 +35,9 @@ version = { attr = "ai_bug_detector.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Tests that start real containers only run on request: pytest -m docker
+addopts = ["-m", "not docker"]
+markers = ["docker: starts real containers, needs Docker and the sandbox image"]
 
 [tool.ruff]
 src = ["src"]

@@ -11,6 +11,7 @@ from ai_bug_detector.ai_panel import show_ai_panel, show_demo
 from ai_bug_detector.models import Severity
 from ai_bug_detector.report import count_by_severity, to_table_rows
 from ai_bug_detector.ruff_analyzer import AnalysisError, analyze_bytes
+from ai_bug_detector.sandbox_panel import show_sandbox_panel
 
 MAX_UPLOAD_MB = 5
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
@@ -82,8 +83,9 @@ def main() -> None:
 
     st.title("AI Bug Detector")
     st.caption(
-        f"Find bugs in Python files with static analysis. "
-        f"Your code is only read, never executed. Version {__version__}."
+        "Find bugs in Python files. Static analysis reads your code without running "
+        "it. Running your tests is optional: it happens in an isolated Docker "
+        f"container, only after you confirm. Version {__version__}."
     )
 
     uploaded_file = st.file_uploader(
@@ -114,6 +116,7 @@ def main() -> None:
     if analysis:
         show_analysis(analysis)
         show_ai_panel(uploaded_file, analysis)
+        show_sandbox_panel(uploaded_file, analysis)
 
     show_demo(show_issues)
 

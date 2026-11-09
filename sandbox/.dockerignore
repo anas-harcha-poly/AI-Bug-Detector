@@ -1,0 +1,6 @@
+# Only the files the image needs are sent to Docker, even if others appear here.
+*
+!Dockerfile
+!requirements.txt
+!pytest.ini
+!runner.py
