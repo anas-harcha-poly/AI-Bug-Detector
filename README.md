@@ -1,70 +1,173 @@
 # AI Bug Detector
 
-AI Python bug detection and code analysis tool.
+**Find bugs in Python code with static analysis and Claude AI.**
 
-> **Project status:** early development. You can upload a Python file in the web
-> interface, see the issues found by Ruff and try a demo of the AI review. The real AI
-> review is optional and has only been tested with simulated API responses so far.
+**[Try the live app → ai-bug-detector-anas.streamlit.app](https://ai-bug-detector-anas.streamlit.app/)**
+
+No account and no API key needed.
+
+AI Bug Detector is a Python web application built with Streamlit. Upload a Python file:
+[Ruff](https://docs.astral.sh/ruff/) reports errors and risky code, Claude AI explains
+the issues and looks for possible logic bugs, and you choose which suggested fixes to
+apply to a downloadable copy of your file. Your code is never run on the public site.
 
 ## Features
 
-- Upload one Python file of up to 5 MB and analyze it with one click.
-- See each issue's severity, line, description and Ruff rule, most severe first.
-- Get a clear message when a file has no issues, is empty or cannot be analyzed.
-- Try the AI review for free on a sample file, with no API key.
-- Optionally, when running locally with your own API key, ask Claude to explain Ruff
-  issues and look for possible logic bugs.
+- **Static analysis with Ruff.** Errors, likely bugs and style issues, each with a
+  severity, a line, a description and its Ruff rule, most severe first.
+- **Real Claude AI review.** Claude Sonnet 5.5 explains each Ruff issue in plain words
+  and looks for logic bugs that static analysis cannot see, such as a wrong condition
+  or a missing edge case. Answers are validated before they are shown.
+- **Interactive fixes.** Fixes come from Ruff and from Claude. Nothing is applied
+  automatically: you accept each fix you want, and conflicting fixes are detected.
+- **Preview of the changes.** See the changes before using them. Every result is
+  checked to still be valid Python.
+- **Download the fixed code.** Get a corrected copy of your file. The original is never
+  changed.
+- **Demo mode.** Try every feature on a sample file, for free and without sending
+  anything. The demo's AI answers are hand-written examples, clearly labeled as such.
 
-## Planned features
+Logic bugs reported by Claude are **hypotheses**: the code is read, never executed, so
+they are not verified. Suggested fixes, from Ruff's unsafe fixes or from Claude, can be
+wrong. Review each one before using it.
 
-1. Isolated test execution for unknown files with Docker.
+## Public site and local version
 
-## Security
+| Feature | Public site | Local version |
+|---|:---:|:---:|
+| Ruff analysis | ✅ | ✅ |
+| Claude AI review | ✅ No key needed | ✅ With your own API key |
+| Interactive fixes, preview and download | ✅ | ✅ |
+| Demo mode | ✅ | ✅ |
+| Models | Sonnet 5.5, Haiku 5.5 | Sonnet 5.5, Haiku 5.5, Opus 5.5 |
+| Running your pytest tests in Docker | ❌ | ✅ Optional |
 
-This project never executes unknown user code outside an isolated environment.
-Until Docker isolation exists, user code is not executed at all.
+On the public site, **visitors never need an Anthropic API key**: the site's key is kept
+on the server, and is never sent to the browser or shown in any message.
 
-## Requirements
+## Protections on the public site
 
-Python 3.12, 3.13 or 3.14.
+- **Consent first.** Nothing is sent to Anthropic until the visitor ticks a consent box
+  for this file and model, then clicks a button. The file name is never sent.
+- **No code execution.** Uploaded code is only read, never imported or run. Docker test
+  runs are turned off on the public site, whatever the configuration says.
+- **Shared budget in Upstash Redis.** Every call first reserves its maximum cost in a
+  budget shared by all visitors and all servers. The check is a single atomic Lua
+  script, so simultaneous requests cannot get around it. The real cost is recorded
+  afterwards; when billing is uncertain, the maximum stays counted.
+- **Spending caps.** A global budget that never resets by itself, and a daily cap. The
+  spend limit of the Anthropic account remains the final safeguard.
+- **Call limits.** A cap on calls per hour for the whole site and on calls running at the
+  same time, with a message telling visitors when to try again. A small per-session cap
+  prevents accidental overuse.
+- **Fail closed.** If the budget database cannot be reached, paid AI is blocked. Ruff,
+  the fixes and the demo keep working.
+- **Untrusted content.** Code is sent to Claude as data, and every answer is validated
+  and shown as plain text, never as Markdown or HTML. No AI model can fully guarantee
+  that instructions hidden in code are ignored.
 
-| Python | Status |
-|---|---|
-| 3.12 | Tests pass |
-| 3.13 | Dependencies resolve, tests not run |
-| 3.14 | Tests pass |
+Anthropic may keep API data for up to 30 days and does not use it for training by
+default ([details](https://platform.claude.com/docs/en/manage-claude/api-and-data-retention)).
+Do not upload code that contains passwords, keys or other secrets.
 
-## Installation (Windows)
+## Tech stack
 
-The commands call the virtual environment's interpreter directly, so the
-environment does not need to be activated.
+Python 3.12–3.14 · Streamlit · Ruff · Anthropic Python SDK (structured outputs) ·
+Upstash Redis (REST API, Lua scripts) · Docker (local test sandbox) · pytest
+
+## Run it locally
+
+Requirements: Python 3.12, 3.13 or 3.14. The commands below are for Windows and call
+the virtual environment's interpreter directly, so it does not need to be activated.
 
 ```powershell
 py -3.14 -m venv .venv
 .venv\Scripts\python.exe -m pip install -e ".[dev]"
-```
-
-## Usage
-
-Start the application, then open the address shown in the terminal:
-
-```powershell
 .venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-Analyze a UTF-8 Python file from the command line:
+Without any setting, the app runs Ruff, the fixes and the demo, and sends nothing to
+any AI service.
+
+### Claude AI with your own key
 
 ```powershell
-.venv\Scripts\python.exe -c "from ai_bug_detector.ruff_analyzer import analyze_file; print(*analyze_file('example.py'), sep='\n')"
+.venv\Scripts\python.exe -m pip install -e ".[dev,ai]"
+$env:AI_BUG_DETECTOR_ENABLE_LIVE_AI = "1"
+.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-## How the analysis works
+Paste your Anthropic API key in the page. It stays in memory for the session and is
+never written to a file. Before each call, the page shows its estimated maximum cost,
+and after it, the real cost. A spending limit for the running app ($1.00 by default)
+can be changed with `$env:AI_BUG_DETECTOR_MAX_SPEND_USD = "2"`.
 
-The code is sent to [Ruff](https://docs.astral.sh/ruff/) through standard input. Ruff
-only reads it, and returns its findings as JSON. The project converts them into `Issue`
-objects with a rule code, a message, a severity and a location. No API key is required.
+To check that the models are available for your key, and measure the size of the
+requests for a file, without creating any billed message:
 
-Ruff reports almost every rule at the same severity, so the project assigns its own:
+```powershell
+.venv\Scripts\python.exe -m ai_bug_detector.claude_check example.py
+```
+
+### Running your tests in Docker (local only)
+
+You can run a pytest test file against your code in a temporary, isolated container:
+no network, read-only file system, an unprivileged user, and limits on memory, CPU,
+processes and time (30 seconds). The container is always removed afterwards. Nothing
+runs until you tick a consent box. No isolation is perfect: only run code you trust.
+
+Requirements: Docker Desktop with Linux containers.
+
+```powershell
+docker build -t ai-bug-detector-sandbox:1 sandbox
+$env:AI_BUG_DETECTOR_ENABLE_SANDBOX = "1"
+.venv\Scripts\python.exe -m streamlit run app.py
+```
+
+## Deploying the public version
+
+Public mode is turned on explicitly. Set these values as Streamlit secrets (or
+environment variables) on the server, never in the repository:
+
+```toml
+AI_BUG_DETECTOR_MODE = "public"
+ANTHROPIC_API_KEY = "..."
+UPSTASH_REDIS_REST_URL = "https://..."
+UPSTASH_REDIS_REST_TOKEN = "..."
+```
+
+Also set `STREAMLIT_CLIENT_SHOW_ERROR_DETAILS=none`, and use a key from a dedicated
+workspace with a spend limit in the Claude Console. Any other value of
+`AI_BUG_DETECTOR_MODE` than `local` or `public` turns paid AI and Docker off. Without
+the database, or without a budget set in it, paid AI stays off.
+
+The owner manages the budget and limits from their own computer. Changes apply at once,
+without redeploying:
+
+```powershell
+.venv\Scripts\python.exe -m ai_bug_detector.budget_admin status
+.venv\Scripts\python.exe -m ai_bug_detector.budget_admin start --budget 10 --daily 1
+.venv\Scripts\python.exe -m ai_bug_detector.budget_admin daily --usd 2
+.venv\Scripts\python.exe -m ai_bug_detector.budget_admin limits --per-hour 10 --concurrent 2
+.venv\Scripts\python.exe -m ai_bug_detector.budget_admin stop
+.venv\Scripts\python.exe -m ai_bug_detector.budget_admin resume
+```
+
+The database URL and token are read from `UPSTASH_REDIS_REST_URL` and
+`UPSTASH_REDIS_REST_TOKEN`, or typed without being shown. `start` begins a new budget
+period at $0 and should only be run after adding credits: it asks for confirmation and
+keeps the previous period in a history. If Anthropic refuses the key or the account
+runs out of credit, paid AI stops for everyone until `resume` is run.
+
+**Known limitation:** the limits are shared, not per visitor. One person can still use
+up the calls of the hour or the daily cap, which blocks everyone for a while; the
+money spent stays capped. Sessions, cookies and IP addresses cannot identify a visitor
+reliably, so fair per-visitor quotas would require sign-in.
+
+## How it works
+
+**Ruff.** The code is passed to Ruff through standard input (rules `E`, `F`, `I`, `B`),
+with a 30-second timeout. The project assigns its own severity:
 
 | Severity | Meaning | Examples |
 |---|---|---|
@@ -72,13 +175,20 @@ Ruff reports almost every rule at the same severity, so the project assigns its 
 | `WARNING` | Possible bug or suspicious code | Mutable default argument (`B006`), unused import (`F401`) |
 | `INFO` | Style and readability | Unsorted imports (`I001`), comparison to `None` (`E711`) |
 
-The analyzer raises `AnalysisError` when an analysis cannot be completed, so a failure
-can never be mistaken for code without issues. Uploaded files stay in memory and are
-never saved to disk, imported or run.
+A failed analysis raises `AnalysisError`, so it can never be mistaken for code without
+issues. Files stay in memory and are never saved to disk.
 
-Known limitations: only UTF-8 files are supported, and static analysis cannot catch every
-bug, such as logic errors. An analysis stops after 30 seconds, which can happen with
-unusual files such as a single very long comment line.
+**Claude.** Each click makes exactly one request, never retried. A review accepts up to
+30 KB of code and 20 Ruff issues, and asks for a JSON answer matching a schema. Line
+numbers, rule codes and fix ranges are checked against the real file before anything
+is shown.
+
+**Fixes.** A fix replaces a range of lines of the original file. Fixes are checked
+against a hash of the original, conflicts are rejected, and the result must parse as
+valid Python. Fixes are parsed, never executed.
+
+**Limitations.** Only UTF-8 files are supported. Static analysis cannot catch every bug,
+and AI suggestions can be wrong.
 
 ## Development
 
@@ -87,192 +197,41 @@ unusual files such as a single very long comment line.
 .venv\Scripts\python.exe -m ruff check .
 ```
 
-Tests never read `.streamlit/secrets.toml` and cannot open network connections outside
-this computer (see `tests/conftest.py`): Upstash and Anthropic are always simulated.
+Tests never call Anthropic or Upstash: both are simulated, and Redis scripts run on
+fakeredis. They never read `.streamlit/secrets.toml` and cannot open network
+connections outside the computer (see `tests/conftest.py`). Tests that need real Docker
+are marked `docker` and skipped by default; run them with `-m docker`.
 
-## Optional AI review
-
-Everything above works without an API key or the Anthropic SDK. The AI review has three
-levels, and each one needs a deliberate step:
-
-| Level | Requirements | What happens |
-|---|---|---|
-| Ruff | None | Local analysis. Nothing leaves your computer |
-| Demo | None | Real Ruff results on a sample file, with **illustrative examples written by hand**. These are not real responses from Claude, and no API is called |
-| Real AI review | SDK, server setting, your own API key, your consent | Your code is sent to the Anthropic API |
-
-To turn on the real AI review on your own computer:
-
-```powershell
-.venv\Scripts\python.exe -m pip install -e ".[dev,ai]"
-$env:AI_BUG_DETECTOR_ENABLE_LIVE_AI = "1"
-.venv\Scripts\python.exe -m streamlit run app.py
-```
-
-This variable only works in local mode. On a public site, use the public mode below
-instead: visitors must never type a key into a page hosted by someone else.
-
-### Public mode
-
-In public mode, visitors use the real AI review without an API key: it is paid with the
-site owner's key, which only the server reads. Turn it on with these settings, as
-Streamlit secrets (`.streamlit/secrets.toml` on the server, or the host's secrets page)
-or as environment variables:
-
-```toml
-AI_BUG_DETECTOR_MODE = "public"
-ANTHROPIC_API_KEY = "your key, only on the server"
-UPSTASH_REDIS_REST_URL = "https://... (the shared budget database)"
-UPSTASH_REDIS_REST_TOKEN = "its token, only on the server"
-```
-
-What changes in public mode:
-
-- There is no API key field. The key is read on the server at the moment of a call, and
-  is never put in the page, the session or an error message.
-- Visitors still have to accept, for each file and model, that their code is sent to
-  Anthropic before any button works.
-- Claude Sonnet 5.5 is the default and Haiku 5.5 is offered. Opus 5.5 is not offered, and
-  the server refuses it even if a request asks for it.
-- Running tests with Docker is never available, whatever `AI_BUG_DETECTOR_ENABLE_SANDBOX`
-  says, and no visitor code is run.
-- Each call is paid from a shared budget (see below). When the budget, today's limit,
-  the key, the SDK or the database is missing, Claude AI stays visible but its buttons
-  are disabled, with a message. Ruff, the fixes and the demo always keep working.
-- If Anthropic refuses the key, or the credits or the spend limit run out, Claude AI is
-  stopped for everyone until the owner turns it back on.
-- Any other value than `local` or `public` is treated as a configuration error: paid AI
-  and Docker stay off.
-
-Also hide error details from visitors with `STREAMLIT_CLIENT_SHOW_ERROR_DETAILS=none`,
-and use a key from a dedicated workspace with a spend limit in the Claude Console.
-
-### Shared AI budget (public mode)
-
-The budget is kept in a Redis database reached over HTTPS, in the format of the Upstash
-REST API. It is shared by every visitor and every copy of the app, and survives
-restarts. Amounts are stored in millionths of a dollar.
-
-- **Before a call**, one Lua script checks every global limit and reserves the call.
-  Redis runs it in one step, so simultaneous calls, even on several servers, can never
-  get around a limit. If one would be passed, nothing is sent. The limits are:
-  - the budget, and today's limit;
-  - 10 calls per hour on the whole site, over a sliding hour (visitors are told the
-    exact time when a call becomes possible again);
-  - 2 calls running at the same time.
-- **After a call**, the real cost replaces the reservation. When it is not known whether
-  the call was billed (a timeout, a server error, a missing usage), its maximum stays
-  counted. A call that never reports back, for example after a crash, is counted at its
-  maximum after 5 minutes, and stops counting as running.
-- **If the database cannot be reached or is not set up**, paid AI is blocked.
-- **The global budget never resets by itself.** The daily limit applies per UTC day.
-- The Console spend limit and prepaid credits without automatic reload stay the last
-  protection: this app only keeps its own count.
-
-The owner manages the budget from their computer, with the database URL and token in
-`UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` (or typed without being shown).
-Changes apply at once, without deploying:
-
-```powershell
-.venv\Scripts\python.exe -m ai_bug_detector.budget_admin status
-.venv\Scripts\python.exe -m ai_bug_detector.budget_admin start --budget 4 --daily 1
-.venv\Scripts\python.exe -m ai_bug_detector.budget_admin daily --usd 0.5
-.venv\Scripts\python.exe -m ai_bug_detector.budget_admin limits --per-hour 10 --concurrent 2
-.venv\Scripts\python.exe -m ai_bug_detector.budget_admin stop
-.venv\Scripts\python.exe -m ai_bug_detector.budget_admin resume
-```
-
-`start` begins a new period with spending at $0: only run it after really adding
-credits, and checking the balance in the Claude Console. It asks to type the amount
-again, and keeps the previous period in a history.
-
-`daily` and `limits` change only those settings: the budget and its spending are kept.
-
-Each Streamlit session can also make up to 3 reviews. This only prevents accidental
-overuse: anyone can open a new session, so it is not a protection against abuse.
-
-**Known limit:** the limits are shared, not split per visitor. One person can still use
-the calls of the hour or today's limit, which then blocks everyone for a while. Sessions,
-cookies and IP addresses cannot identify a visitor reliably. Fair per-visitor limits
-need sign-in.
-
-`AI_BUG_DETECTOR_MAX_SPEND_USD` only applies in local mode.
-
-### Cost
-
-Using this project costs nothing without an API key. A real review is billed to the
-owner of the key, through prepaid API credits. Before each call, the page shows an
-estimated maximum cost, and after it, the actual cost.
-
-| Model | Input / output, per million tokens |
+| Python | Status |
 |---|---|
-| Claude Sonnet 5.5 (default) | $2 / $10 |
-| Claude Opus 5.5 | $4 / $20 |
-| Claude Haiku 5.5 | $0.10 / $0.50 |
-
-To limit costs:
-
-- A review accepts up to 30 KB of code, sends up to 20 Ruff issues (most severe first),
-  and generates up to 6,000 output tokens, thinking included.
-- Thinking is turned off on Sonnet 5.5 and Haiku 5.5. Opus 5.5 does not allow it, so it
-  runs with low or medium effort.
-- Each click makes one request, and failed requests are never retried automatically.
-- The app refuses any call that could take its spending above a limit: $1.00 by default
-  while it runs. Change it with `$env:AI_BUG_DETECTOR_MAX_SPEND_USD = "2"`. This limit
-  resets when the app restarts, so also set a spend limit on a dedicated workspace in the
-  Claude Console.
-
-Check the [current prices](https://platform.claude.com/docs/en/about-claude/pricing)
-before use.
-
-### Free check before a first real call
-
-This checks that the models exist for your key, and measures the exact size of the
-requests for a file. It creates no message, so nothing is billed. The key is typed
-without being shown, and is never printed or saved.
-
-```powershell
-.venv\Scripts\python.exe -m ai_bug_detector.claude_check first_test.py
-```
-
-### Data and safety
-
-- **Consent:** nothing is sent until you accept for this file and model, and click a
-  button (in local mode, you also enter your key). The file name is not sent.
-- **Retention:** Anthropic may keep the data for up to 30 days and does not use API data
-  for training by default. See its
-  [data retention documentation](https://platform.claude.com/docs/en/manage-claude/api-and-data-retention).
-  Do not send code containing secrets.
-- **API key:** in local mode, it stays in memory for the session. In public mode, it stays
-  on the server. It is never written to a file by the app. Do not commit it: `.env` and
-  `.streamlit/secrets.toml` are ignored by Git.
-- **Logs:** do not set `ANTHROPIC_LOG`. The SDK never logs the key, but its debug logs
-  show the code that is sent.
-- **Untrusted content:** analyzed code is sent as data, so instructions hidden in it should
-  not be followed, though no AI model can guarantee this. Answers are validated and shown
-  as plain text.
-- **Fixes:** a suggested fix is only used if you accept it, to build a preview and a
-  downloadable copy. Your file is never changed, and no fix is ever run.
-- **Logic bugs:** these are unverified hypotheses, because the code is not run.
+| 3.12 | Tests pass |
+| 3.13 | Dependencies resolve, tests not run |
+| 3.14 | Tests pass |
 
 ## Project structure
 
 ```text
-├── .streamlit/config.toml  Visual theme
-├── app.py                  Streamlit entry point (user interface)
-├── pyproject.toml          Project metadata, dependencies and tool settings
+├── app.py                  Streamlit entry point
+├── pyproject.toml          Metadata, dependencies and tool settings
+├── .streamlit/config.toml  Light and dark theme
+├── sandbox/                Docker image for local test runs
 ├── src/ai_bug_detector/
-│   ├── models.py           Shared data: Issue and Severity
-│   ├── report.py           Sorts and prepares results for display
-│   ├── ruff_analyzer.py    Runs Ruff and converts its results into Issue objects
-│   ├── ai_models.py        AI review data, and validation of AI answers
-│   ├── ai_prompts.py       What is sent to the AI, and the size limits
-│   ├── ai_review.py        Demo and Claude reviewers, costs and API errors
-│   ├── ai_panel.py         AI part of the page: demo, consent and results
-│   ├── deployment.py       Local or public mode, and the server's API key
+│   ├── ruff_analyzer.py    Runs Ruff and converts its findings
+│   ├── models.py           Shared data: issues, severities, Ruff fixes
+│   ├── report.py           Sorting and table rows
+│   ├── ai_prompts.py       What is sent to Claude, and size limits
+│   ├── ai_models.py        Answer schemas and validation
+│   ├── ai_review.py        Demo and Claude reviewers, costs, API errors
+│   ├── ai_panel.py         AI section of the page, consent, demo
+│   ├── fixes.py            Applying accepted fixes safely
+│   ├── fix_panel.py        Fix selection, preview and download
+│   ├── deployment.py       Local or public mode, server-side secrets
+│   ├── shared_budget.py    Shared budget and call limits in Redis
 │   ├── redis_rest.py       Minimal HTTPS client for the Upstash REST API
-│   ├── shared_budget.py    Shared AI budget of a public site, kept in Redis
-│   ├── budget_admin.py     Owner's command to view, renew or stop that budget
-│   └── demo/               Sample file and hand-written illustrative examples
+│   ├── budget_admin.py     Owner's budget command
+│   ├── claude_check.py     Free check of the API setup
+│   ├── docker_sandbox.py   Isolated test runs (local only)
+│   ├── sandbox_panel.py    Test run section of the page
+│   └── demo/               Sample file and hand-written demo answers
 └── tests/                  Automated tests
 ```

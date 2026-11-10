@@ -549,3 +549,34 @@ def test_an_unknown_api_error_never_shows_the_key(public_app, monkeypatch):
     assert "Something odd happened for [hidden]" in public_app.error[0].value
     assert SERVER_KEY not in rendered(public_app)
     assert not PAID_AI_PAUSE.is_paused()  # Not an account problem.
+
+
+# --- The text under the title ---
+
+
+def header(app: AppTest) -> str:
+    return app.caption[0].value
+
+
+def test_public_intro_presents_the_site_without_docker(public_app):
+    text = header(public_app)
+
+    assert "Ruff static analysis" in text
+    assert "Claude AI" in text and "logic bugs" in text
+    assert "fixes" in text
+    assert "Your code is never run." in text
+    assert "Docker" not in text and "tests" not in text
+
+
+def test_misconfigured_site_does_not_mention_docker_either(monkeypatch):
+    monkeypatch.setenv(MODE_VARIABLE, "prod")
+
+    assert "Docker" not in header(make_app())
+
+
+def test_local_intro_still_explains_the_docker_test_runs():
+    text = header(make_app())
+
+    assert "Static analysis reads your code without running it" in text
+    assert "isolated Docker container, only after you confirm" in text
+    assert "Version" in text

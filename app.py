@@ -10,6 +10,7 @@ import streamlit as st
 
 from ai_bug_detector import __version__
 from ai_bug_detector.ai_panel import claude_reviews, show_ai_panel, show_demo
+from ai_bug_detector.deployment import is_public
 from ai_bug_detector.fix_panel import show_upload_fixes
 from ai_bug_detector.models import Severity
 from ai_bug_detector.report import count_by_severity, to_table_rows
@@ -83,6 +84,25 @@ def show_issues(issues: list) -> None:
     )
 
 
+# The public site never runs code, so its introduction does not mention Docker.
+PUBLIC_INTRO = (
+    "Find bugs in Python code. Ruff static analysis reports errors and risky code, "
+    "Claude AI explains the issues and looks for possible logic bugs, and you choose "
+    "which suggested fixes to preview and download. Your code is never run."
+)
+LOCAL_INTRO = (
+    "Find bugs in Python files. Static analysis reads your code without running "
+    "it. Running your tests is optional: it happens in an isolated Docker "
+    "container, only after you confirm."
+)
+
+
+def intro_text() -> str:
+    """The text under the title: Docker is only mentioned where it can be used."""
+    intro = PUBLIC_INTRO if is_public() else LOCAL_INTRO
+    return f"{intro} Version {__version__}."
+
+
 def main() -> None:
     st.set_page_config(
         page_title="AI Bug Detector",
@@ -91,11 +111,7 @@ def main() -> None:
     )
 
     st.title("AI Bug Detector")
-    st.caption(
-        "Find bugs in Python files. Static analysis reads your code without running "
-        "it. Running your tests is optional: it happens in an isolated Docker "
-        f"container, only after you confirm. Version {__version__}."
-    )
+    st.caption(intro_text())
 
     uploaded_file = st.file_uploader(
         "Python file",
