@@ -1,19 +1,22 @@
-"""The AI budget of a public site, shared by every visitor and every copy of the app.
+"""The AI budget and call limits of a public site, shared by every visitor and server.
 
-It is kept in an external Redis database (Upstash REST API), so it survives restarts
-and is the same for every server process. Amounts are whole millionths of a dollar,
-so no rounding error can add up.
+They are kept in an external Redis database (Upstash REST API), so they survive
+restarts and are the same for every server process. Amounts are whole millionths of
+a dollar, so no rounding error can add up.
 
-How a call is paid for:
+How a call is allowed and paid for:
 
-1. Before anything is sent, a Lua script reserves the call's maximum cost. Redis runs
-   a script as one step, so two calls, even from two servers, can never both take
-   the last part of the budget. If the budget or today's limit would be passed, or the
-   budget cannot be checked, nothing is sent.
+1. Before anything is sent, one Lua script checks every global limit and, if all of
+   them allow it, reserves the call. Redis runs a script as one step, so calls made
+   at the same moment, even from several servers, can never get around a limit. The
+   limits are: the budget, today's limit, the calls of the last hour, and the calls
+   running at the same time. If one would be passed, or they cannot be checked,
+   nothing is sent.
 2. After the call, the reservation is replaced by the real cost. When it is not known
    whether the call was billed (a timeout, for example), its maximum stays counted.
 3. A reservation that is never settled (a server crashed during the call) expires
-   after RESERVATION_SECONDS and stays counted at its maximum.
+   after RESERVATION_SECONDS: its maximum stays counted, and its place among the
+   calls running at the same time is freed.
 
 The global budget is never reset by time. Only the owner resets it, after buying
 credits, with: python -m ai_bug_detector.budget_admin start
@@ -21,6 +24,7 @@ A daily limit, per UTC day, also keeps one day of abuse from using everything.
 """
 
 import json
+import math
 import time
 import uuid
 from dataclasses import dataclass, replace
@@ -38,9 +42,16 @@ from ai_bug_detector.redis_rest import RedisRest, StoreError
 
 KEY_PREFIX = "ai-bug-detector:budget"
 MICRO = 1_000_000  # Millionths of a dollar in one dollar.
-# Longer than any call can take (2 minutes): after this, a call that never reported
-# back is counted as spent at its maximum.
-RESERVATION_SECONDS = 10 * 60
+# Longer than any call can take (2 minutes, then reading the answer): after this, a
+# call that never reported back is counted as spent at its maximum, and no longer
+# counts as running.
+RESERVATION_SECONDS = 5 * 60
+# Used until the owner sets other values with budget_admin limits.
+DEFAULT_CALLS_PER_HOUR = 10
+DEFAULT_CONCURRENT_CALLS = 2
+HOUR_SECONDS = 3600
+MAX_CALLS_PER_HOUR = 1000
+MAX_CONCURRENT_CALLS = 20
 _DAY_KEY_SECONDS = 8 * 24 * 3600
 _HISTORY_LENGTH = 50
 # Refuses a budget typed with an extra zero, for example. Raise it if really needed.
@@ -54,14 +65,19 @@ local function num(key, name)
   local value = redis.call('HGET', key, name)
   if not value then return 0 end
   local number = tonumber(value)
-  -- Stops the whole script: a damaged budget blocks calls, never allows them.
+  -- Stops the whole script: damaged data blocks calls, never allows them.
   if not number then error('budget data is not valid') end
   return number
 end
+local function setting(name, default)
+  if redis.call('HEXISTS', KEYS[1], name) == 0 then return tonumber(default) end
+  return num(KEYS[1], name)
+end
 """
 
-# KEYS: state, in-flight deadlines, in-flight amounts, today
-# ARGV: reservation id, amount, now (ms), deadline (ms), seconds to keep today's data
+# KEYS: state, in-flight deadlines, in-flight amounts, today, recent calls
+# ARGV: reservation id, amount, now (ms), deadline (ms), seconds to keep today's data,
+#       default calls per hour, default calls at the same time, start of the hour (ms)
 _RESERVE = (
     _NUMBER
     + """
@@ -73,6 +89,7 @@ for _, id in ipairs(stale) do
   redis.call('HDEL', KEYS[3], id)
   redis.call('ZREM', KEYS[2], id)
 end
+redis.call('ZREMRANGEBYSCORE', KEYS[5], '-inf', ARGV[8])
 if redis.call('HEXISTS', KEYS[1], 'limit') == 0 then return {'not_configured'} end
 if redis.call('HGET', KEYS[1], 'status') ~= 'open' then return {'stopped'} end
 local amount = tonumber(ARGV[2])
@@ -82,18 +99,28 @@ if used + amount > num(KEYS[1], 'limit') then return {'budget_used_up'} end
 if num(KEYS[4], 'committed') + amount > num(KEYS[1], 'daily_limit') then
   return {'daily_used_up'}
 end
+if redis.call('ZCARD', KEYS[5]) >= setting('calls_per_hour', ARGV[6]) then
+  local oldest = redis.call('ZRANGE', KEYS[5], 0, 0, 'WITHSCORES')
+  return {'hourly_limit', oldest[2] or ''}
+end
+if redis.call('ZCARD', KEYS[2]) >= setting('concurrent_calls', ARGV[7]) then
+  return {'busy'}
+end
 redis.call('HINCRBY', KEYS[1], 'reserved', amount)
 redis.call('HINCRBY', KEYS[1], 'calls', 1)
 redis.call('ZADD', KEYS[2], ARGV[4], ARGV[1])
 redis.call('HSET', KEYS[3], ARGV[1], ARGV[2])
 redis.call('HINCRBY', KEYS[4], 'committed', amount)
 redis.call('EXPIRE', KEYS[4], ARGV[5])
+redis.call('ZADD', KEYS[5], ARGV[3], ARGV[1])
+redis.call('EXPIRE', KEYS[5], 7200)
 return {'ok'}
 """
 )
 
 # KEYS: state, in-flight deadlines, in-flight amounts, the day of the reservation
 # ARGV: reservation id, real cost, 'spent' or 'uncertain'
+# A finished call frees its place among running calls, but still counts in the hour.
 _SETTLE = """
 local reserved = redis.call('HGET', KEYS[3], ARGV[1])
 if not reserved then return 'unknown' end
@@ -109,15 +136,22 @@ end
 return 'ok'
 """
 
-# KEYS: state, today, in-flight amounts
+# KEYS: state, today, in-flight deadlines, recent calls
+# ARGV: now (ms), start of the hour (ms). Reads only: nothing is changed.
 _STATUS = """
+local window = '(' .. ARGV[2]
+local oldest = redis.call('ZRANGEBYSCORE', KEYS[4], window, '+inf', 'WITHSCORES',
+  'LIMIT', 0, 1)
 return {redis.call('HGETALL', KEYS[1]),
         redis.call('HGET', KEYS[2], 'committed') or '0',
-        redis.call('HLEN', KEYS[3])}
+        redis.call('ZCOUNT', KEYS[3], '(' .. ARGV[1], '+inf'),
+        redis.call('ZCOUNT', KEYS[4], window, '+inf'),
+        oldest[2] or ''}
 """
 
 # KEYS: state. ARGV: budget, daily limit, start time.
-# Calls still in flight keep their reservation: they belong to the new period.
+# Calls still in flight keep their reservation: they belong to the new period. The
+# call limits are kept as they are.
 _START = """
 local previous = redis.call('HGETALL', KEYS[1])
 redis.call('HSET', KEYS[1], 'limit', ARGV[1], 'daily_limit', ARGV[2],
@@ -143,6 +177,8 @@ class Availability(StrEnum):
     STOPPED = "stopped"  # Turned off by the owner, or after an account problem.
     BUDGET_USED_UP = "budget_used_up"
     DAILY_USED_UP = "daily_used_up"
+    HOURLY_LIMIT = "hourly_limit"  # Too many calls on the whole site this hour.
+    BUSY = "busy"  # Too many calls running at the same time.
 
 
 _STILL_WORKING = "Ruff, the fixes and the demo still work."
@@ -161,15 +197,45 @@ VISITOR_MESSAGES = {
         "Claude AI is temporarily unavailable: today's AI budget has run out. It "
         f"should be back tomorrow (UTC). {_STILL_WORKING}"
     ),
+    Availability.HOURLY_LIMIT: (
+        "Claude AI is temporarily unavailable: this site has reached its limit of AI "
+        f"reviews for the last hour. Try again later. {_STILL_WORKING}"
+    ),
+    Availability.BUSY: (
+        "Claude AI is busy with other visitors' reviews right now. Try again in a "
+        f"minute or two. {_STILL_WORKING}"
+    ),
 }
 
 
-class BudgetRefused(AiReviewError):
-    """The call was not sent: the budget does not allow it, or cannot be checked."""
+def visitor_message(
+    availability: Availability, retry_at: float | None = None, now: float | None = None
+) -> str:
+    """The message for visitors. With retry_at (epoch seconds), says when to retry.
 
-    def __init__(self, availability: Availability) -> None:
-        super().__init__(VISITOR_MESSAGES[availability])
+    retry_at is only given for the hourly limit: it is known exactly, from the time
+    of the oldest call of the last hour.
+    """
+    if availability is not Availability.HOURLY_LIMIT or retry_at is None:
+        return VISITOR_MESSAGES[availability]
+    now = time.time() if now is None else now
+    minutes = max(1, math.ceil((retry_at - now) / 60))
+    at = datetime.fromtimestamp(retry_at, UTC).strftime("%H:%M")
+    unit = "minute" if minutes == 1 else "minutes"
+    return (
+        "Claude AI is temporarily unavailable: this site has reached its limit of AI "
+        f"reviews for the last hour. Try again after {at} UTC (in about {minutes} "
+        f"{unit}). {_STILL_WORKING}"
+    )
+
+
+class BudgetRefused(AiReviewError):
+    """The call was not sent: a limit does not allow it, or cannot be checked."""
+
+    def __init__(self, availability: Availability, retry_at: float | None = None):
+        super().__init__(visitor_message(availability, retry_at))
         self.availability = availability
+        self.retry_at = retry_at
 
 
 def to_micro(dollars: float) -> int:
@@ -190,7 +256,7 @@ class Reservation:
 
 @dataclass(frozen=True)
 class BudgetStatus:
-    """The budget as stored, in millionths of a dollar."""
+    """The budget and call limits as stored. Amounts in millionths of a dollar."""
 
     availability: Availability
     limit: int = 0
@@ -204,6 +270,10 @@ class BudgetStatus:
     period: int = 0
     started_at: str = ""
     stop_reason: str = ""
+    calls_per_hour: int = DEFAULT_CALLS_PER_HOUR
+    concurrent_calls: int = DEFAULT_CONCURRENT_CALLS
+    calls_last_hour: int = 0
+    oldest_call_ms: int = 0  # Start of the oldest call of the last hour.
 
     @property
     def used(self) -> int:
@@ -211,11 +281,21 @@ class BudgetStatus:
 
     @property
     def remaining(self) -> int:
-        """What a new call may still reserve, given both limits."""
+        """What a new call may still reserve, given both money limits."""
         return max(0, min(self.limit - self.used, self.daily_limit - self.today))
 
+    @property
+    def retry_at(self) -> float | None:
+        """When the hourly limit allows a call again (epoch seconds), if reached."""
+        if self.calls_last_hour < self.calls_per_hour or not self.oldest_call_ms:
+            return None
+        return self.oldest_call_ms / 1000 + HOUR_SECONDS
+
     def refusal_for(self, cost_usd: float) -> Availability | None:
-        """Why a call of this maximum cost would be refused now, or None."""
+        """Why a call of this maximum cost would be refused now, or None.
+
+        Checked in the same order as the reservation script.
+        """
         if self.availability is not Availability.OPEN:
             return self.availability
         amount = to_micro(cost_usd)
@@ -223,7 +303,18 @@ class BudgetStatus:
             return Availability.BUDGET_USED_UP
         if self.today + amount > self.daily_limit:
             return Availability.DAILY_USED_UP
+        if self.calls_last_hour >= self.calls_per_hour:
+            return Availability.HOURLY_LIMIT
+        if self.in_flight >= self.concurrent_calls:
+            return Availability.BUSY
         return None
+
+    def message_for(self, cost_usd: float) -> str | None:
+        """The visitor message for refusal_for, or None if the call is allowed."""
+        availability = self.refusal_for(cost_usd)
+        if availability is None:
+            return None
+        return visitor_message(availability, self.retry_at)
 
 
 UNAVAILABLE_STATUS = BudgetStatus(Availability.UNAVAILABLE)
@@ -238,17 +329,19 @@ class SharedBudget:
         self._state = f"{prefix}:state"
         self._deadlines = f"{prefix}:in-flight"
         self._amounts = f"{prefix}:in-flight-amounts"
+        self._recent = f"{prefix}:recent-calls"
         self._history = f"{prefix}:history"
         self._day_prefix = f"{prefix}:day:"
 
     # --- Used by the app ---
 
     def reserve(self, cost_usd: float) -> Reservation:
-        """Reserve the maximum cost of a call, or raise BudgetRefused."""
+        """Check every limit and reserve the call at once, or raise BudgetRefused."""
         amount = to_micro(cost_usd)
         if amount <= 0:
             raise BudgetRefused(Availability.UNAVAILABLE)
         now = self._clock()
+        now_ms = int(now * 1000)
         reservation = Reservation(uuid.uuid4().hex, amount, self._day(now))
         try:
             answer = self._eval(
@@ -258,23 +351,32 @@ class SharedBudget:
                     self._deadlines,
                     self._amounts,
                     self._day_key(reservation),
+                    self._recent,
                 ],
                 [
                     reservation.reservation_id,
                     amount,
-                    int(now * 1000),
+                    now_ms,
                     int((now + RESERVATION_SECONDS) * 1000),
                     _DAY_KEY_SECONDS,
+                    DEFAULT_CALLS_PER_HOUR,
+                    DEFAULT_CONCURRENT_CALLS,
+                    now_ms - HOUR_SECONDS * 1000,
                 ],
             )
-            outcome = _text(answer[0]) if isinstance(answer, list) and answer else ""
+            if not isinstance(answer, list) or not answer:
+                raise StoreError("The storage gave an answer that is not valid.")
+            outcome = _text(answer[0])
         except StoreError:
-            outcome = "error"
+            outcome, answer = "error", []
         finally:
             STATUS_CACHE.clear()
         if outcome == "ok":
             return reservation
-        raise BudgetRefused(_REFUSALS.get(outcome, Availability.UNAVAILABLE))
+        retry_at = None
+        if outcome == "hourly_limit":
+            retry_at = _retry_time(answer[1] if len(answer) > 1 else "")
+        raise BudgetRefused(_REFUSALS.get(outcome, Availability.UNAVAILABLE), retry_at)
 
     def settle(self, reservation: Reservation, cost_usd: float, *, certain: bool):
         """Replace a reservation by the real cost. Never raises.
@@ -304,12 +406,7 @@ class SharedBudget:
     def status(self) -> BudgetStatus:
         """Read the budget. Never raises: a failure means paid AI is unavailable."""
         try:
-            answer = self._eval(
-                _STATUS,
-                [self._state, self._day_key_for(self._clock()), self._amounts],
-                [],
-            )
-            return _parse_status(answer)
+            return self.checked_status()
         except (StoreError, TypeError, ValueError, IndexError):
             return UNAVAILABLE_STATUS
 
@@ -343,13 +440,39 @@ class SharedBudget:
         _check_limits(to_dollars(current.limit) or MAX_BUDGET_USD, daily_usd)
         return self._update("daily_limit", to_micro(daily_usd))
 
+    def set_call_limits(
+        self, per_hour: int | None = None, concurrent: int | None = None
+    ) -> bool:
+        """Change the call limits only: the budget and spending are not touched."""
+        pairs = []
+        if per_hour is not None:
+            if not 1 <= per_hour <= MAX_CALLS_PER_HOUR:
+                raise ValueError(
+                    f"Calls per hour must be between 1 and {MAX_CALLS_PER_HOUR}."
+                )
+            pairs += ["calls_per_hour", per_hour]
+        if concurrent is not None:
+            if not 1 <= concurrent <= MAX_CONCURRENT_CALLS:
+                raise ValueError(
+                    "Calls at the same time must be between 1 and "
+                    f"{MAX_CONCURRENT_CALLS}."
+                )
+            pairs += ["concurrent_calls", concurrent]
+        if not pairs:
+            raise ValueError("Give --per-hour, --concurrent or both.")
+        return self._update(*pairs)
+
     def resume(self) -> bool:
         return self._update("status", "open", "stop_reason", "")
 
     def checked_status(self) -> BudgetStatus:
         """Like status(), but raises StoreError: the owner needs to know why."""
+        now = self._clock()
+        now_ms = int(now * 1000)
         answer = self._eval(
-            _STATUS, [self._state, self._day_key_for(self._clock()), self._amounts], []
+            _STATUS,
+            [self._state, self._day_key_for(now), self._deadlines, self._recent],
+            [now_ms, now_ms - HOUR_SECONDS * 1000],
         )
         return _parse_status(answer)
 
@@ -382,7 +505,17 @@ _REFUSALS = {
     "stopped": Availability.STOPPED,
     "budget_used_up": Availability.BUDGET_USED_UP,
     "daily_used_up": Availability.DAILY_USED_UP,
+    "hourly_limit": Availability.HOURLY_LIMIT,
+    "busy": Availability.BUSY,
 }
+
+
+def _retry_time(oldest_ms) -> float | None:
+    """When the oldest call of the hour leaves it, or None if that is not known."""
+    try:
+        return int(float(_text(oldest_ms))) / 1000 + HOUR_SECONDS
+    except (TypeError, ValueError):
+        return None
 
 
 def _check_limits(budget_usd: float, daily_usd: float) -> None:
@@ -408,11 +541,14 @@ def _pairs(flat) -> dict[str, str]:
 def _parse_status(answer) -> BudgetStatus:
     state = _pairs(answer[0])
     today, in_flight = int(_text(answer[1])), int(answer[2])
+    calls_last_hour = int(answer[3])
+    oldest = _text(answer[4])
+    oldest_call_ms = int(float(oldest)) if oldest else 0
     if "limit" not in state:
         return BudgetStatus(Availability.UNAVAILABLE, today=today, in_flight=in_flight)
 
-    def number(name: str) -> int:
-        return int(state.get(name, "0"))
+    def number(name: str, default: int = 0) -> int:
+        return int(state.get(name, default))
 
     status = BudgetStatus(
         Availability.OPEN,
@@ -427,6 +563,10 @@ def _parse_status(answer) -> BudgetStatus:
         period=number("period"),
         started_at=state.get("started_at", ""),
         stop_reason=state.get("stop_reason", ""),
+        calls_per_hour=number("calls_per_hour", DEFAULT_CALLS_PER_HOUR),
+        concurrent_calls=number("concurrent_calls", DEFAULT_CONCURRENT_CALLS),
+        calls_last_hour=calls_last_hour,
+        oldest_call_ms=oldest_call_ms,
     )
     if state.get("status") != "open":
         availability = Availability.STOPPED

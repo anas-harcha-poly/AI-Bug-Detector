@@ -282,6 +282,7 @@ def test_a_status_shows_why_a_call_would_be_refused(budget):
 def test_simultaneous_calls_never_go_over_the_budget(fake, clock):
     setup = app_copy(fake, clock)
     setup.start_period(1, 1)
+    setup.set_call_limits(per_hour=1000, concurrent=20)  # Only money limits here.
     copies = [app_copy(fake, clock) for _ in range(3)]  # Three servers.
     accepted, refused = [], []
     start = threading.Barrier(40)
@@ -308,6 +309,7 @@ def test_simultaneous_reviews_never_go_over_the_budget(fake, clock, monkeypatch)
     """Through the real reviewer: calls overlap while their answers are awaited."""
     budget = app_copy(fake, clock)
     budget.start_period(0.5, 0.5)
+    budget.set_call_limits(per_hour=1000, concurrent=20)  # Only money limits here.
     maximum = estimate_max_cost(
         build_logic_bug_message(SOURCE), LOGIC_BUG_SYSTEM_PROMPT, SONNET
     )

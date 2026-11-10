@@ -3,6 +3,7 @@
     python -m ai_bug_detector.budget_admin status
     python -m ai_bug_detector.budget_admin start --budget 4 --daily 1
     python -m ai_bug_detector.budget_admin daily --usd 0.5
+    python -m ai_bug_detector.budget_admin limits --per-hour 10 --concurrent 2
     python -m ai_bug_detector.budget_admin stop
     python -m ai_bug_detector.budget_admin resume
 
@@ -56,6 +57,9 @@ def describe(status: BudgetStatus) -> str:
         f"  Left: {_money(max(0, status.limit - status.used))}",
         f"Today (UTC): {_money(status.today)} of {_money(status.daily_limit)}",
         f"Calls this period: {status.calls}",
+        f"Calls in the last hour (whole site): {status.calls_last_hour} of "
+        f"{status.calls_per_hour}",
+        f"Calls running now: {status.in_flight} of {status.concurrent_calls}",
     ]
     if status.stop_reason:
         lines.append(f"Stopped because: {status.stop_reason}")
@@ -77,6 +81,11 @@ def main(argv=None, *, budget: SharedBudget | None = None, ask=input) -> int:
     start.add_argument("--daily", type=float, required=True, help="In dollars.")
     daily = commands.add_parser("daily", help="Change the daily limit only.")
     daily.add_argument("--usd", type=float, required=True)
+    limits = commands.add_parser(
+        "limits", help="Change the call limits only (not the budget)."
+    )
+    limits.add_argument("--per-hour", type=int, help="Calls per hour, whole site.")
+    limits.add_argument("--concurrent", type=int, help="Calls at the same time.")
     commands.add_parser("stop", help="Turn paid AI off for every visitor.")
     commands.add_parser("resume", help="Turn paid AI back on.")
     args = parser.parse_args(argv)
@@ -109,6 +118,13 @@ def _run(args, budget: SharedBudget, ask) -> int:
             print("Not changed: no budget has been set yet, or storage failed.")
             return 1
         print(f"Daily limit set to ${args.usd:.2f}.")
+        return 0
+
+    if args.command == "limits":
+        if not budget.set_call_limits(args.per_hour, args.concurrent):
+            print("Not changed: no budget has been set yet, or storage failed.")
+            return 1
+        print(describe(budget.checked_status()))
         return 0
 
     if args.command == "resume":

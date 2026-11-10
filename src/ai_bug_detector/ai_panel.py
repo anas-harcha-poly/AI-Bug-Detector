@@ -51,6 +51,7 @@ from ai_bug_detector.ruff_analyzer import AnalysisError, analyze_bytes
 from ai_bug_detector.shared_budget import (
     VISITOR_MESSAGES,
     Availability,
+    BudgetRefused,
     public_budget,
     public_status,
 )
@@ -70,6 +71,15 @@ CONSENT_LABEL = "I agree to send this file's code to Anthropic for this review."
 PUBLIC_UNAVAILABLE = VISITOR_MESSAGES[Availability.UNAVAILABLE]
 # Visitors are never told about the owner's account: the same message is used.
 PUBLIC_PAUSED = PUBLIC_UNAVAILABLE
+# Public mode: an indicative limit per Streamlit session, against accidental overuse.
+# It is NOT a protection against abuse: anyone can open a new session. The real
+# limits are global, in shared_budget.py.
+SESSION_CALL_LIMIT = 3
+SESSION_CALLS_KEY = "ai_session_calls"
+SESSION_LIMIT_MESSAGE = (
+    f"This session has used its {SESSION_CALL_LIMIT} Claude AI reviews. Ruff, the "
+    "fixes and the demo still work."
+)
 _ACCOUNT_STOP_REASON = (
     "Anthropic refused the site's key or account (credits, spend limit or key). "
     "Check the Claude Console, then resume."
@@ -199,7 +209,8 @@ def _show_live_review(uploaded_file, issues: list, *, public: bool) -> None:
     if public:
         st.caption(
             "This site pays for AI reviews: you do not need an API key. Its budget "
-            "is small and shared by all visitors, so reviews may become unavailable."
+            "is small and shared by all visitors, so reviews may become unavailable. "
+            f"Each session can make up to {SESSION_CALL_LIMIT} reviews."
         )
         api_key, key_given = "", True
     else:
@@ -284,8 +295,9 @@ def _show_live_review(uploaded_file, issues: list, *, public: bool) -> None:
     )
 
     # Checked again here: this is the last step before code leaves the computer.
-    # The budget itself is checked once more, atomically, by the reservation.
-    if can_send and (explain_clicked or logic_clicked):
+    # The global limits are checked once more, atomically, by the reservation.
+    blocked = explain_refusal if explain_clicked else logic_refusal
+    if can_send and (explain_clicked or logic_clicked) and blocked is None:
         action = EXPLAIN_ACTION if explain_clicked else LOGIC_ACTION
         # Public mode: read on the server now, used for this call, then dropped.
         key = server_api_key() if public else api_key
@@ -293,16 +305,25 @@ def _show_live_review(uploaded_file, issues: list, *, public: bool) -> None:
             results[model_id, action] = PUBLIC_UNAVAILABLE
         else:
             reviewer = ClaudeReviewer(key, model_id)
+            if explain_clicked:
+
+                def review():
+                    return reviewer.explain_issues(source, selected_issues)
+            else:
+
+                def review():
+                    return reviewer.find_logic_bugs(source)
+
+            if public:
+                # Counted before the call: a click during the call starts a new run
+                # of the page, which could stop this one before it counts.
+                st.session_state[SESSION_CALLS_KEY] = _session_calls() + 1
             with st.spinner("Waiting for Claude..."):
-                if explain_clicked:
-                    results[model_id, action] = _call(
-                        lambda: reviewer.explain_issues(source, selected_issues),
-                        public,
-                    )
-                else:
-                    results[model_id, action] = _call(
-                        lambda: reviewer.find_logic_bugs(source), public
-                    )
+                result, sent = _call(review, public)
+            results[model_id, action] = result
+            if public and not sent:
+                # Refused before sending: this review does not count.
+                st.session_state[SESSION_CALLS_KEY] = max(0, _session_calls() - 1)
         st.rerun()  # Updates the buttons above, which are drawn before the call.
 
     for action, title in (
@@ -321,8 +342,13 @@ def _public_refusal(cost: float) -> str | None:
     """Why a review of this maximum cost cannot start on this site, or None."""
     if not server_key_configured() or not sdk_available() or PAID_AI_PAUSE.is_paused():
         return PUBLIC_UNAVAILABLE
-    availability = public_status().refusal_for(cost)
-    return None if availability is None else VISITOR_MESSAGES[availability]
+    if _session_calls() >= SESSION_CALL_LIMIT:
+        return SESSION_LIMIT_MESSAGE
+    return public_status().message_for(cost)
+
+
+def _session_calls() -> int:
+    return st.session_state.get(SESSION_CALLS_KEY, 0)
 
 
 def _local_refusals(explain_cost: float, logic_cost: float) -> tuple:
@@ -359,13 +385,20 @@ def _is_done(results: dict, model_id: str, action: str) -> bool:
     return result is not None and not isinstance(result, str)
 
 
-def _call(review: Callable, public: bool) -> ExplanationReview | LogicReview | str:
-    """Return the review, or a message that is safe to show if it failed."""
+def _call(
+    review: Callable, public: bool
+) -> tuple[ExplanationReview | LogicReview | str, bool]:
+    """Return the review, or a message that is safe to show if it failed.
+
+    Also returns False when nothing was sent, because a limit refused the call.
+    """
     try:
-        return review()
+        return review(), True
+    except BudgetRefused as error:
+        return str(error), False
     except AiUnavailableError as error:
         if not public:
-            return str(error)  # The user's own account: they can act on it.
+            return str(error), True  # The user's own account: they can act on it.
         # The site owner's account: stop paid AI for everyone, on every server,
         # until the owner checks the account and resumes it. Visitors are not
         # given details about the owner's account.
@@ -373,9 +406,9 @@ def _call(review: Callable, public: bool) -> ExplanationReview | LogicReview | s
         budget = public_budget()
         if budget is not None:
             budget.stop(_ACCOUNT_STOP_REASON)
-        return PUBLIC_PAUSED
+        return PUBLIC_PAUSED, True
     except AiReviewError as error:
-        return str(error)
+        return str(error), True
 
 
 def _show_review(

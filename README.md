@@ -87,6 +87,9 @@ unusual files such as a single very long comment line.
 .venv\Scripts\python.exe -m ruff check .
 ```
 
+Tests never read `.streamlit/secrets.toml` and cannot open network connections outside
+this computer (see `tests/conftest.py`): Upstash and Anthropic are always simulated.
+
 ## Optional AI review
 
 Everything above works without an API key or the Anthropic SDK. The AI review has three
@@ -150,13 +153,17 @@ The budget is kept in a Redis database reached over HTTPS, in the format of the 
 REST API. It is shared by every visitor and every copy of the app, and survives
 restarts. Amounts are stored in millionths of a dollar.
 
-- **Before a call**, a Lua script reserves its maximum cost. Redis runs it in one step,
-  so simultaneous calls, even on several servers, can never share the same last dollars.
-  If the budget or today's limit would be passed, nothing is sent.
+- **Before a call**, one Lua script checks every global limit and reserves the call.
+  Redis runs it in one step, so simultaneous calls, even on several servers, can never
+  get around a limit. If one would be passed, nothing is sent. The limits are:
+  - the budget, and today's limit;
+  - 10 calls per hour on the whole site, over a sliding hour (visitors are told the
+    exact time when a call becomes possible again);
+  - 2 calls running at the same time.
 - **After a call**, the real cost replaces the reservation. When it is not known whether
   the call was billed (a timeout, a server error, a missing usage), its maximum stays
   counted. A call that never reports back, for example after a crash, is counted at its
-  maximum after 10 minutes.
+  maximum after 5 minutes, and stops counting as running.
 - **If the database cannot be reached or is not set up**, paid AI is blocked.
 - **The global budget never resets by itself.** The daily limit applies per UTC day.
 - The Console spend limit and prepaid credits without automatic reload stay the last
@@ -170,6 +177,7 @@ Changes apply at once, without deploying:
 .venv\Scripts\python.exe -m ai_bug_detector.budget_admin status
 .venv\Scripts\python.exe -m ai_bug_detector.budget_admin start --budget 4 --daily 1
 .venv\Scripts\python.exe -m ai_bug_detector.budget_admin daily --usd 0.5
+.venv\Scripts\python.exe -m ai_bug_detector.budget_admin limits --per-hour 10 --concurrent 2
 .venv\Scripts\python.exe -m ai_bug_detector.budget_admin stop
 .venv\Scripts\python.exe -m ai_bug_detector.budget_admin resume
 ```
@@ -178,9 +186,15 @@ Changes apply at once, without deploying:
 credits, and checking the balance in the Claude Console. It asks to type the amount
 again, and keeps the previous period in a history.
 
-**Known limit:** the budget is shared, not split per visitor. One person can still use
-today's limit, which then blocks everyone until the next day. Sessions, cookies and IP
-addresses cannot identify a visitor reliably. Fair per-visitor limits need sign-in.
+`daily` and `limits` change only those settings: the budget and its spending are kept.
+
+Each Streamlit session can also make up to 3 reviews. This only prevents accidental
+overuse: anyone can open a new session, so it is not a protection against abuse.
+
+**Known limit:** the limits are shared, not split per visitor. One person can still use
+the calls of the hour or today's limit, which then blocks everyone for a while. Sessions,
+cookies and IP addresses cannot identify a visitor reliably. Fair per-visitor limits
+need sign-in.
 
 `AI_BUG_DETECTOR_MAX_SPEND_USD` only applies in local mode.
 
