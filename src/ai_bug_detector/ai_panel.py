@@ -68,6 +68,13 @@ DEMO_NOTICE = (
     "No code is sent anywhere and no API key is needed."
 )
 CONSENT_LABEL = "I agree to send this file's code to Anthropic for this review."
+PRIVACY_TITLE = ":material/shield: Privacy Notice"
+PRIVACY_NOTICE = (
+    "Your code and its Ruff results are sent to Anthropic's API only after you give "
+    "your consent below. The file name is not sent. Anthropic may keep this data for "
+    "up to 30 days and does not use it for training by default. Do not include "
+    "passwords, API keys or other sensitive information."
+)
 PUBLIC_UNAVAILABLE = VISITOR_MESSAGES[Availability.UNAVAILABLE]
 # Visitors are never told about the owner's account: the same message is used.
 PUBLIC_PAUSED = PUBLIC_UNAVAILABLE
@@ -244,15 +251,20 @@ def _show_live_review(uploaded_file, issues: list, *, public: bool) -> None:
     logic_cost = estimate_max_cost(
         build_logic_bug_message(source), LOGIC_BUG_SYSTEM_PROMPT, model_id
     )
-    st.warning(
-        "**Before you continue:** the code of this file and its Ruff results will be "
-        "sent to the Anthropic API. The file name is not sent. Anthropic may keep this "
-        "data for up to 30 days, and does not use API data for training by default. "
-        "Do not send passwords, keys or other secrets.\n\n"
-        f"Estimated maximum cost on {'this site' if public else 'your'} API account: "
-        f"${explain_cost:.3f} to explain issues, ${logic_cost:.3f} to search for logic "
-        "bugs. Only one request is made per click, and nothing is retried."
-    )
+    if public:
+        # Visitors do not pay: no amounts are shown. The costs above are still used
+        # by every budget and limit check.
+        _show_privacy_notice()
+    else:
+        st.warning(
+            "**Before you continue:** the code of this file and its Ruff results will "
+            "be sent to the Anthropic API. The file name is not sent. Anthropic may "
+            "keep this data for up to 30 days, and does not use API data for training "
+            "by default. Do not send passwords, keys or other secrets.\n\n"
+            f"Estimated maximum cost on your API account: ${explain_cost:.3f} to "
+            f"explain issues, ${logic_cost:.3f} to search for logic bugs. Only one "
+            "request is made per click, and nothing is retried."
+        )
     if len(issues) > MAX_ISSUES:
         st.caption(
             f"Only the {MAX_ISSUES} most severe of {len(issues)} issues will be "
@@ -335,7 +347,15 @@ def _show_live_review(uploaded_file, issues: list, *, public: bool) -> None:
             st.error(result)
         elif result is not None:
             st.markdown(f"#### {title}")
-            _show_review(result, source, model_id)
+            # The cost of each review is only shown to the owner of the key.
+            _show_review(result, source, None if public else model_id)
+
+
+def _show_privacy_notice() -> None:
+    """A discreet notice, drawn with native components that follow the theme."""
+    with st.container(border=True):
+        st.markdown(f"**{PRIVACY_TITLE}**")
+        st.caption(PRIVACY_NOTICE)
 
 
 def _public_refusal(cost: float) -> str | None:
